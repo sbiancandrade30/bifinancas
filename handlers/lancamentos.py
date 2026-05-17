@@ -250,6 +250,14 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
     })
 
 
+import random
+import string
+
+def _gerar_id() -> str:
+    """Gera um identificador curto único para cada transação."""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+
+
 def _calcular_saldo_mes(mes_ano: str) -> dict:
     """Calcula saldo atualizado do mês após salvar."""
     lst = sheets.buscar_lancamentos_mes(mes_ano)
@@ -260,7 +268,7 @@ def _calcular_saldo_mes(mes_ano: str) -> dict:
 
 
 async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
-    """Salva na planilha e envia confirmação com saldo atualizado."""
+    """Salva na planilha e envia confirmação no estilo GranaZen."""
     ok = sheets.salvar_lancamento(
         d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
         d["descricao"], d["valor"], d["forma"], d["mes_ano"], d["parcela_info"]
@@ -286,36 +294,46 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     # Busca saldo atualizado
     saldo_info = _calcular_saldo_mes(d["mes_ano"])
 
-    emoji_tipo  = "💸" if d["tipo"] == "gasto" else "💰"
-    pagto_label = emoji_pagto(d["forma"]) if d["forma"] != "perguntar" else "💳"
-    sub_str     = f" · _{d['subcategoria']}_" if d.get("subcategoria") else ""
+    # Gera ID único da transação
+    tid = _gerar_id()
 
+    # Emoji do tipo
+    tipo_emoji = "🟥 Despesa" if d["tipo"] == "gasto" else "🟩 Receita"
+    pagto_label = emoji_pagto(d["forma"]) if d["forma"] != "perguntar" else "💳 Cartão"
+    saldo_emoji = "✅" if saldo_info["saldo"] >= 0 else "⚠️"
+
+    # Extras (parcelas, metas)
     extras = []
     if d["parcelas"] > 1:
-        extras.append(f"📦 {d['parcelas']}x de {fmt_brl(d['valor']/d['parcelas'])}")
+        extras.append(f"📦 *Parcelas:* {d['parcelas']}x de {fmt_brl(d['valor']/d['parcelas'])}")
     if d["eh_reserva"]:
-        extras.append("🛡 Reserva de emergência atualizada!")
+        extras.append("🛡 *Reserva de emergência atualizada!*")
     if d["eh_pais"]:
-        extras.append("👨‍👩‍👧 Dívida com os pais atualizada!")
+        extras.append("👨‍👩‍👧 *Dívida com os pais atualizada!*")
     extras_str = ("\n" + "\n".join(extras)) if extras else ""
 
-    # Linha de saldo atualizado
-    saldo_emoji = "✅" if saldo_info["saldo"] >= 0 else "⚠️"
-    saldo_linha = (
-        f"\n\n💬 _{d['tipo'].capitalize()} de {fmt_brl(d['valor'])} "
-        f"{'adicionada' if d['tipo'] == 'entrada' else 'registrada'} "
-        f"em {d['categoria']}._\n"
-        f"{saldo_emoji} _Seu saldo atual é {fmt_brl(saldo_info['saldo'])}_ "
-        f"_(entradas {fmt_brl(saldo_info['entradas'])} · gastos {fmt_brl(saldo_info['gastos'])})_"
+    msg = (
+        f"✅ *Transação registrada com sucesso!*\n"
+        f"Identificador: *{tid}*\n\n"
+        f"📋 *Resumo da transação:*\n"
+        f"{'—' * 20}\n"
+        f"✏️ *Descrição:* {d['descricao']}\n"
+        f"💸 *Valor:* {fmt_brl(d['valor'])}\n"
+        f"🔵 *Tipo:* {tipo_emoji}\n"
+        f"🏷 *Categoria:* {d['categoria']}"
+        + (f" › {d['subcategoria']}" if d.get("subcategoria") else "") + "\n"
+        f"{pagto_label}\n"
+        f"📅 *Data:* {d['data_str']}\n"
+        f"✔️ *Pago:* ✅"
+        f"{extras_str}\n\n"
+        f"{'—' * 20}\n"
+        f"{saldo_emoji} *Saldo atual:* {fmt_brl(saldo_info['saldo'])}\n"
+        f"_Entradas: {fmt_brl(saldo_info['entradas'])} · Gastos: {fmt_brl(saldo_info['gastos'])}_\n\n"
+        f"❌ Para excluir diga: *\"Excluir transação {tid}\"*"
     )
 
-    status = "✅ Salvo" if ok else "⚠️ Erro ao salvar"
-    msg = (
-        f"{emoji_tipo} {d['confirmacao']}\n"
-        f"📁 _{d['categoria']}{sub_str}_ · {pagto_label} · {d['data_str']}"
-        f"{extras_str}"
-        f"{saldo_linha}"
-    )
+    if not ok:
+        msg += "\n\n⚠️ _Erro ao salvar na planilha._"
 
     if edit and hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(msg, parse_mode="Markdown")

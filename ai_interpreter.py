@@ -362,14 +362,24 @@ def classificar_intencao(texto: str) -> str:
 
     # Incerto — vai para IA decidir
     return "incerto"
-    """Fallback sem IA."""
+
+
+def _resumo_simples(lancamentos, mes_ano, meta_guardar) -> str:
+    """Fallback sem IA — estilo GranaZen."""
     gastos   = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "gasto")
     entradas = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "entrada")
     saldo    = entradas - gastos
     ok = "✅" if saldo >= meta_guardar else "⚠️"
-    return (f"📊 *Resumo {mes_ano}*\n\n"
-            f"➕ Entradas: R$ {entradas:,.2f}\n"
-            f"➖ Gastos: R$ {gastos:,.2f}\n"
-            f"{ok} Saldo: R$ {saldo:,.2f}\n"
-            f"🎯 Meta: R$ {meta_guardar:,.2f}\n"
-            f"📌 {len(lancamentos)} lançamentos")
+    return (
+        f"📊 *Resumo Financeiro — {mes_ano}*\n\n"
+        f"🏦 *Seu Saldo*\n"
+        f"{'—' * 20}\n"
+        f"💰 *Disponível:* R$ {saldo:,.2f}\n\n"
+        f"📈 *Receitas*\n"
+        f"Recebido: R$ {entradas:,.2f}\n\n"
+        f"📉 *Despesas*\n"
+        f"Pago: R$ {gastos:,.2f}\n\n"
+        f"{'—' * 20}\n"
+        f"{ok} *Meta de poupança:* R$ {meta_guardar:,.2f}\n"
+        f"📌 {len(lancamentos)} lançamentos registrados"
+    )

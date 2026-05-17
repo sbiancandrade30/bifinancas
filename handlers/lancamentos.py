@@ -1,0 +1,366 @@
+"""
+handlers/lancamentos.py — Registro de gastos e entradas
+Suporta: texto, foto de nota fiscal, áudio
+"""
+import logging
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+import parser_local
+import ai_interpreter as ai
+import sheets
+from config import CARTOES, FORMAS_PAGTO
+from utils.formatters import fmt_brl, emoji_pagto, calcular_encerramento_parcela, mes_atual
+
+logger = logging.getLogger(__name__)
+
+BOTOES_PAGTO = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("💜 Nubank",        callback_data="pagto:nubank"),
+        InlineKeyboardButton("💳 Santander",     callback_data="pagto:santander"),
+    ],
+    [
+        InlineKeyboardButton("💛 Mercado Pago",  callback_data="pagto:mercadopago"),
+        InlineKeyboardButton("🟢 Caedu",         callback_data="pagto:caedu"),
+    ],
+    [
+        InlineKeyboardButton("💛 Banco do Brasil", callback_data="pagto:bb"),
+        InlineKeyboardButton("💳 Débito",        callback_data="pagto:debito"),
+    ],
+    [
+        InlineKeyboardButton("⚡ Pix",           callback_data="pagto:pix"),
+        InlineKeyboardButton("💵 Dinheiro",      callback_data="pagto:dinheiro"),
+    ],
+])
+
+
+async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    # 1. Classifica a intenção da mensagem
+    intencao = ai.classificar_intencao(texto)
+
+    # 2. Se for dúvida clara — responde como assistente
+    if intencao == "duvida":
+        contexto_mes = _calcular_saldo_mes(mes_atual())
+        resposta = ai.responder_duvida(texto, contexto_mes)
+        await update.message.reply_text(resposta, parse_mode="Markdown")
+        return
+
+    # 3. Se for lançamento ou incerto — tenta registrar
+    # Primeiro tenta parser local (grátis, instantâneo)
+    dados = parser_local.parse(texto)
+
+    # Se não conseguiu, chama Gemini
+    if not dados:
+        dados = ai.interpretar_texto(texto)
+
+    # Se o Gemini também não conseguiu reconhecer como lançamento
+    if not dados:
+        # Última chance: trata como dúvida
+        contexto_mes = _calcular_saldo_mes(mes_atual())
+        resposta = ai.responder_duvida(texto, contexto_mes)
+        await update.message.reply_text(resposta, parse_mode="Markdown")
+        return
+
+    tipo = dados.get("tipo", "invalido")
+
+    if tipo == "invalido":
+        # Pode ser uma dúvida disfarçada — responde como assistente
+        msg_invalido = dados.get("mensagem", "")
+        contexto_mes = _calcular_saldo_mes(mes_atual())
+        resposta = ai.responder_duvida(texto, contexto_mes)
+        await update.message.reply_text(resposta, parse_mode="Markdown")
+        return
+
+    if tipo == "wishlist":
+        await _processar_wishlist(update, context, dados)
+        return
+
+    if tipo == "simulador":
+        await _processar_simulador(update, context, dados, texto)
+        return
+
+    await _finalizar_lancamento(update, context, dados, texto)
+
+
+async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Processa foto de nota fiscal, comprovante de pix, fatura de cartão.
+    Extrai valor, estabelecimento, data e itens automaticamente.
+    """
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+    await update.message.reply_text(
+        "📸 Lendo a imagem... pode levar alguns segundos."
+    )
+
+    # Baixa a foto em maior resolução
+    photo = update.message.photo[-1]
+    file  = await context.bot.get_file(photo.file_id)
+    image_bytes = bytes(await file.download_as_bytearray())
+
+    # Verifica se tem legenda (ex: "nota do mercado de ontem")
+    legenda = update.message.caption or ""
+
+    dados = ai.interpretar_imagem(image_bytes)
+
+    if not dados:
+        await update.message.reply_text(
+            "❌ Não consegui ler a imagem.\n\n"
+            "Dicas para funcionar melhor:\n"
+            "• Foto nítida e bem iluminada\n"
+            "• Cupom fiscal completo na imagem\n"
+            "• Ou descreva o gasto em texto mesmo 😊"
+        )
+        return
+
+    tipo_img    = dados.get("tipo_imagem", "")
+    valor       = float(dados.get("valor", 0))
+    descricao   = dados.get("descricao", "")
+    categoria   = dados.get("categoria", "Outros")
+    data_str    = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
+    forma       = dados.get("forma_pagto", "perguntar")
+    itens       = dados.get("itens", [])
+    confirmacao = dados.get("confirmacao", f"Imagem lida! {fmt_brl(valor)}")
+
+    # Ícone do tipo de imagem
+    icone_tipo = {
+        "nota_fiscal":       "🧾",
+        "comprovante_pix":   "⚡",
+        "extrato":           "📋",
+        "fatura":            "💳",
+    }.get(tipo_img, "📸")
+
+    # Monta preview do que foi lido
+    itens_str = ""
+    if itens:
+        itens_str = "\n\n*Itens identificados:*\n" + "\n".join(f"  • {i}" for i in itens[:8])
+        if len(itens) > 8:
+            itens_str += f"\n  _... e mais {len(itens)-8} itens_"
+
+    legenda_str = f"\n📝 _Contexto: {legenda}_" if legenda else ""
+
+    preview = (
+        f"{icone_tipo} *Imagem lida com sucesso!*\n\n"
+        f"💰 Valor: *{fmt_brl(valor)}*\n"
+        f"🏪 Local: _{descricao}_\n"
+        f"📁 Categoria: _{categoria}_\n"
+        f"📅 Data: _{data_str}_"
+        f"{legenda_str}"
+        f"{itens_str}\n\n"
+        f"_Salvando..._"
+    )
+    await update.message.reply_text(preview, parse_mode="Markdown")
+
+    # Se tem legenda, usa para refinar a interpretação
+    if legenda and not dados.get("forma_pagto"):
+        dados_legenda = ai.interpretar_texto(legenda)
+        if dados_legenda and dados_legenda.get("forma_pagto"):
+            forma = dados_legenda.get("forma_pagto", forma)
+
+    dados["forma_pagto"] = forma
+    dados["descricao"]   = descricao or legenda[:50] or "Nota fiscal"
+    dados["eh_reserva"]  = False
+    dados["eh_pais"]     = False
+    dados["subcategoria"] = dados.get("subcategoria", "")
+
+    await _finalizar_lancamento(update, context, dados, legenda or "foto")
+
+
+async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa mensagem de voz."""
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+    await update.message.reply_text("🎤 Ouvindo...")
+
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    audio_bytes = await file.download_as_bytearray()
+
+    transcricao = ai.transcrever_audio(bytes(audio_bytes))
+    if not transcricao:
+        await update.message.reply_text(
+            "❌ Não consegui entender o áudio. Tente digitar o lançamento."
+        )
+        return
+
+    await update.message.reply_text(f"🎤 _\"{transcricao}\"_", parse_mode="Markdown")
+    dados = ai.interpretar_audio_transcrito(transcricao)
+
+    if not dados:
+        await update.message.reply_text("❌ Não entendi o que foi dito.")
+        return
+
+    await _finalizar_lancamento(update, context, dados, transcricao)
+
+
+async def _finalizar_lancamento(update, context, dados, texto_original):
+    """Salva o lançamento ou pergunta a forma de pagamento."""
+    tipo     = dados.get("tipo", "gasto")
+    valor    = float(dados.get("valor", 0))
+    categoria = dados.get("categoria", "Outros")
+    subcategoria = dados.get("subcategoria", "")
+    descricao = dados.get("descricao", texto_original[:50])
+    forma    = dados.get("forma_pagto", "perguntar")
+    parcelas = int(dados.get("parcelas", 1))
+    eh_reserva = dados.get("eh_reserva", False)
+    eh_pais    = dados.get("eh_pais", False)
+
+    # Processar data
+    data_str = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
+    try:
+        data_obj = datetime.strptime(data_str, "%d/%m/%Y")
+        mes_ano  = data_obj.strftime("%Y-%m")
+    except:
+        data_obj = datetime.now()
+        mes_ano  = data_obj.strftime("%Y-%m")
+        data_str = data_obj.strftime("%d/%m/%Y")
+
+    parcela_info = f"1/{parcelas}" if parcelas > 1 else ""
+
+    # Se forma não foi detectada, pergunta com botões
+    if forma == "perguntar" and tipo == "gasto":
+        context.user_data["pendente"] = {
+            "data_str": data_str, "tipo": tipo, "categoria": categoria,
+            "subcategoria": subcategoria, "descricao": descricao,
+            "valor": valor, "mes_ano": mes_ano, "parcelas": parcelas,
+            "parcela_info": parcela_info, "eh_reserva": eh_reserva,
+            "eh_pais": eh_pais,
+            "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
+        }
+        await update.message.reply_text(
+            f"*{fmt_brl(valor)}* em _{descricao}_\n\nComo você pagou?",
+            parse_mode="Markdown",
+            reply_markup=BOTOES_PAGTO
+        )
+        return
+
+    await _salvar_e_confirmar(update, context, {
+        "data_str": data_str, "tipo": tipo, "categoria": categoria,
+        "subcategoria": subcategoria, "descricao": descricao,
+        "valor": valor, "forma": forma, "mes_ano": mes_ano,
+        "parcelas": parcelas, "parcela_info": parcela_info,
+        "eh_reserva": eh_reserva, "eh_pais": eh_pais,
+        "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
+    })
+
+
+def _calcular_saldo_mes(mes_ano: str) -> dict:
+    """Calcula saldo atualizado do mês após salvar."""
+    lst = sheets.buscar_lancamentos_mes(mes_ano)
+    gastos   = sum(float(r["Valor"]) for r in lst if r["Tipo"] == "gasto")
+    entradas = sum(float(r["Valor"]) for r in lst if r["Tipo"] == "entrada")
+    saldo    = entradas - gastos
+    return {"gastos": gastos, "entradas": entradas, "saldo": saldo, "n": len(lst)}
+
+
+async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
+    """Salva na planilha e envia confirmação com saldo atualizado."""
+    ok = sheets.salvar_lancamento(
+        d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
+        d["descricao"], d["valor"], d["forma"], d["mes_ano"], d["parcela_info"]
+    )
+
+    # Atualiza metas automaticamente
+    if d["tipo"] == "entrada" and d["eh_reserva"]:
+        atual = sheets.buscar_meta_valor("reserva")
+        sheets.atualizar_meta("Reserva de emergência", atual + d["valor"])
+
+    if d["tipo"] == "gasto" and d["eh_pais"]:
+        atual = sheets.buscar_meta_valor("pais")
+        sheets.atualizar_meta("Dívida com os pais", atual + d["valor"])
+
+    # Salva parcelas
+    if d["parcelas"] > 1 and d["tipo"] == "gasto":
+        encerra = calcular_encerramento_parcela(d["parcelas"])
+        sheets.salvar_parcela(
+            d["descricao"], d["forma"],
+            d["valor"] / d["parcelas"], 1, d["parcelas"], encerra
+        )
+
+    # Busca saldo atualizado
+    saldo_info = _calcular_saldo_mes(d["mes_ano"])
+
+    emoji_tipo  = "💸" if d["tipo"] == "gasto" else "💰"
+    pagto_label = emoji_pagto(d["forma"]) if d["forma"] != "perguntar" else "💳"
+    sub_str     = f" · _{d['subcategoria']}_" if d.get("subcategoria") else ""
+
+    extras = []
+    if d["parcelas"] > 1:
+        extras.append(f"📦 {d['parcelas']}x de {fmt_brl(d['valor']/d['parcelas'])}")
+    if d["eh_reserva"]:
+        extras.append("🛡 Reserva de emergência atualizada!")
+    if d["eh_pais"]:
+        extras.append("👨‍👩‍👧 Dívida com os pais atualizada!")
+    extras_str = ("\n" + "\n".join(extras)) if extras else ""
+
+    # Linha de saldo atualizado
+    saldo_emoji = "✅" if saldo_info["saldo"] >= 0 else "⚠️"
+    saldo_linha = (
+        f"\n\n💬 _{d['tipo'].capitalize()} de {fmt_brl(d['valor'])} "
+        f"{'adicionada' if d['tipo'] == 'entrada' else 'registrada'} "
+        f"em {d['categoria']}._\n"
+        f"{saldo_emoji} _Seu saldo atual é {fmt_brl(saldo_info['saldo'])}_ "
+        f"_(entradas {fmt_brl(saldo_info['entradas'])} · gastos {fmt_brl(saldo_info['gastos'])})_"
+    )
+
+    status = "✅ Salvo" if ok else "⚠️ Erro ao salvar"
+    msg = (
+        f"{emoji_tipo} {d['confirmacao']}\n"
+        f"📁 _{d['categoria']}{sub_str}_ · {pagto_label} · {d['data_str']}"
+        f"{extras_str}"
+        f"{saldo_linha}"
+    )
+
+    if edit and hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, parse_mode="Markdown")
+    else:
+        await update_or_query.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def callback_pagto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback dos botões de forma de pagamento."""
+    query = update.callback_query
+    await query.answer()
+
+    if not query.data.startswith("pagto:"):
+        return
+
+    forma    = query.data.split(":")[1]
+    pendente = context.user_data.get("pendente")
+
+    if not pendente:
+        await query.edit_message_text("⚠️ Sessão expirada. Registre novamente.")
+        return
+
+    context.user_data.pop("pendente", None)
+    pendente["forma"] = forma
+    await _salvar_e_confirmar(query, context, pendente, edit=True)
+
+
+async def _processar_wishlist(update, context, dados):
+    item       = dados.get("wishlist_item") or dados.get("descricao", "Item")
+    valor      = float(dados.get("valor", 0))
+    prioridade = dados.get("wishlist_prioridade", "media")
+    ok = sheets.salvar_wishlist(item, valor, prioridade)
+    emoji_pri  = {"alta": "🔴", "media": "🟡", "baixa": "🟢"}.get(prioridade, "⚪")
+    if ok:
+        msg = (f"⭐ *{item}* adicionado à wishlist!\n"
+               f"{fmt_brl(valor)} · {emoji_pri} prioridade {prioridade}\n\n"
+               f"_/wishlist para ver tudo_")
+    else:
+        msg = "⚠️ Não consegui salvar na wishlist."
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def _processar_simulador(update, context, dados, texto_original):
+    from handlers.comandos import _cmd_simulador_interno
+    descricao = dados.get("simulador_descricao") or dados.get("descricao", texto_original)
+    valor     = float(dados.get("simulador_valor_total") or dados.get("valor", 0))
+    parcelas  = int(dados.get("simulador_parcelas") or dados.get("parcelas", 1))
+    await _cmd_simulador_interno(update, context, descricao, valor, parcelas)

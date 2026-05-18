@@ -58,8 +58,24 @@ def get_sheet():
 
 
 def _garantir_cabecalhos(ws, cabecalhos: list[str]):
-    """Cria ou complementa cabeçalhos sem apagar dados existentes."""
+    """Cria ou complementa cabeçalhos sem apagar dados existentes.
+
+    Algumas planilhas antigas podem ter sido criadas com menos colunas do que
+    a versão atual do bot precisa. Antes de escrever novos cabeçalhos, ampliamos
+    a grade da aba para evitar erro de "exceeds grid limits".
+    """
     atuais = ws.row_values(1)
+
+    # Garante espaço físico para todas as colunas esperadas, mesmo em abas antigas.
+    colunas_necessarias = max(len(cabecalhos), len(atuais))
+    if ws.col_count < colunas_necessarias:
+        ws.add_cols(colunas_necessarias - ws.col_count)
+        logger.info(
+            "Aba '%s' ampliada para %s colunas.",
+            ws.title,
+            colunas_necessarias,
+        )
+
     if not atuais:
         ws.append_row(cabecalhos)
         return
@@ -67,6 +83,8 @@ def _garantir_cabecalhos(ws, cabecalhos: list[str]):
     for cab in cabecalhos:
         if cab not in atuais:
             atuais.append(cab)
+            if ws.col_count < len(atuais):
+                ws.add_cols(len(atuais) - ws.col_count)
             ws.update_cell(1, len(atuais), cab)
             logger.info("Coluna '%s' adicionada à aba '%s'.", cab, ws.title)
 

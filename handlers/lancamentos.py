@@ -3,6 +3,7 @@ handlers/lancamentos.py — Registro de gastos e entradas
 Suporta: texto, foto de nota fiscal, áudio
 """
 import logging
+import re
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -38,6 +39,16 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
+
+    # Exclusão por identificador, antes de passar por IA/parser.
+    match_exclusao = re.match(
+        r"^\s*(?:excluir|apagar|remover)\s+(?:a\s+)?(?:transa[cç][aã]o|lan[cç]amento)?\s*([A-Z0-9]{5})\s*$",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    if match_exclusao:
+        await _processar_exclusao(update, match_exclusao.group(1).upper())
+        return
 
     # 1. Classifica a intenção da mensagem
     intencao = ai.classificar_intencao(texto)
@@ -233,8 +244,18 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
             "eh_pais": eh_pais,
             "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
         }
+        if parcelas > 1:
+            valor_parcela = valor / parcelas
+            texto_pagto = (
+                f"*{fmt_brl(valor)}* em _{descricao}_\n"
+                f"📦 {parcelas}x de *{fmt_brl(valor_parcela)}*\n\n"
+                "Como você pagou?"
+            )
+        else:
+            texto_pagto = f"*{fmt_brl(valor)}* em _{descricao}_\n\nComo você pagou?"
+
         await update.message.reply_text(
-            f"*{fmt_brl(valor)}* em _{descricao}_\n\nComo você pagou?",
+            texto_pagto,
             parse_mode="Markdown",
             reply_markup=BOTOES_PAGTO
         )
@@ -269,48 +290,69 @@ def _calcular_saldo_mes(mes_ano: str) -> dict:
 
 async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     """Salva na planilha e envia confirmação no estilo GranaZen."""
-    ok = sheets.salvar_lancamento(
-        d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
-        d["descricao"], d["valor"], d["forma"], d["mes_ano"], d["parcela_info"]
-    )
+    tid = _gerar_id()
+    parcelas = max(int(d.get("parcelas", 1) or 1), 1)
+    valor_total = float(d["valor"])
+    eh_parcelado = d["tipo"] == "gasto" and parcelas > 1
+    valor_mes = round(valor_total / parcelas, 2) if eh_parcelado else valor_total
+    meta = "reserva" if d.get("eh_reserva") else ("pais" if d.get("eh_pais") else "")
 
-    # Atualiza metas automaticamente
-    if d["tipo"] == "entrada" and d["eh_reserva"]:
-        atual = sheets.buscar_meta_valor("reserva")
-        sheets.atualizar_meta("Reserva de emergência", atual + d["valor"])
-
-    if d["tipo"] == "gasto" and d["eh_pais"]:
-        atual = sheets.buscar_meta_valor("pais")
-        sheets.atualizar_meta("Dívida com os pais", atual + d["valor"])
-
-    # Salva parcelas
-    if d["parcelas"] > 1 and d["tipo"] == "gasto":
-        encerra = calcular_encerramento_parcela(d["parcelas"])
-        sheets.salvar_parcela(
-            d["descricao"], d["forma"],
-            d["valor"] / d["parcelas"], 1, d["parcelas"], encerra
+    if eh_parcelado:
+        ok = sheets.salvar_lancamento_parcelado(
+            d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
+            d["descricao"], valor_total, d["forma"], d["mes_ano"], parcelas,
+            transacao_id=tid, meta=meta,
+        )
+    else:
+        ok = sheets.salvar_lancamento(
+            d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
+            d["descricao"], valor_mes, d["forma"], d["mes_ano"], d["parcela_info"],
+            transacao_id=tid, valor_total=valor_total, meta=meta,
         )
 
-    # Busca saldo atualizado
-    saldo_info = _calcular_saldo_mes(d["mes_ano"])
+    if ok:
+        # Atualiza metas automaticamente apenas depois de confirmar que o lançamento foi salvo.
+        if d["tipo"] == "entrada" and d.get("eh_reserva"):
+            atual = sheets.buscar_meta_valor("reserva")
+            sheets.atualizar_meta("Reserva de emergência", atual + valor_mes)
 
-    # Gera ID único da transação
-    tid = _gerar_id()
+        if d["tipo"] == "gasto" and d.get("eh_pais"):
+            atual = sheets.buscar_meta_valor("pais")
+            sheets.atualizar_meta("Dívida com os pais", atual + valor_mes)
+
+        # Salva a compra parcelada em aba própria para acompanhamento de parcelas ativas.
+        if eh_parcelado:
+            encerra = calcular_encerramento_parcela(parcelas, d["data_str"])
+            sheets.salvar_parcela(
+                d["descricao"], d["forma"], valor_mes, 1, parcelas, encerra,
+                mes_inicio=d["mes_ano"], transacao_id=tid, valor_total=valor_total,
+            )
+
+    # Busca saldo atualizado do mês corrente da transação.
+    saldo_info = _calcular_saldo_mes(d["mes_ano"])
 
     # Emoji do tipo
     tipo_emoji = "🟥 Despesa" if d["tipo"] == "gasto" else "🟩 Receita"
     pagto_label = emoji_pagto(d["forma"]) if d["forma"] != "perguntar" else "💳 Cartão"
     saldo_emoji = "✅" if saldo_info["saldo"] >= 0 else "⚠️"
 
-    # Extras (parcelas, metas)
     extras = []
-    if d["parcelas"] > 1:
-        extras.append(f"📦 *Parcelas:* {d['parcelas']}x de {fmt_brl(d['valor']/d['parcelas'])}")
-    if d["eh_reserva"]:
+    if eh_parcelado:
+        extras.append(f"📦 *Parcelas:* {parcelas}x de {fmt_brl(valor_mes)}")
+        extras.append("🗓 *Impacto mensal:* as parcelas futuras já foram distribuídas nos próximos meses")
+    if d.get("eh_reserva"):
         extras.append("🛡 *Reserva de emergência atualizada!*")
-    if d["eh_pais"]:
+    if d.get("eh_pais"):
         extras.append("👨‍👩‍👧 *Dívida com os pais atualizada!*")
     extras_str = ("\n" + "\n".join(extras)) if extras else ""
+
+    if eh_parcelado:
+        bloco_valor = (
+            f"💸 *Valor total:* {fmt_brl(valor_total)}\n"
+            f"📅 *Lançado neste mês:* {fmt_brl(valor_mes)}\n"
+        )
+    else:
+        bloco_valor = f"💸 *Valor:* {fmt_brl(valor_mes)}\n"
 
     msg = (
         f"✅ *Transação registrada com sucesso!*\n"
@@ -318,7 +360,7 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
         f"📋 *Resumo da transação:*\n"
         f"{'—' * 20}\n"
         f"✏️ *Descrição:* {d['descricao']}\n"
-        f"💸 *Valor:* {fmt_brl(d['valor'])}\n"
+        f"{bloco_valor}"
         f"🔵 *Tipo:* {tipo_emoji}\n"
         f"🏷 *Categoria:* {d['categoria']}"
         + (f" › {d['subcategoria']}" if d.get("subcategoria") else "") + "\n"
@@ -333,12 +375,42 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     )
 
     if not ok:
-        msg += "\n\n⚠️ _Erro ao salvar na planilha._"
+        msg = (
+            "⚠️ *Não consegui salvar essa transação na planilha.*\n\n"
+            "Tente enviar de novo. Se acontecer novamente, me avise para eu revisar a integração."
+        )
 
     if edit and hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(msg, parse_mode="Markdown")
     else:
         await update_or_query.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def _processar_exclusao(update: Update, transacao_id: str):
+    resultado = sheets.excluir_transacao(transacao_id)
+    if not resultado.get("ok"):
+        await update.message.reply_text(
+            f"Não encontrei uma transação com o identificador *{transacao_id}*.",
+            parse_mode="Markdown",
+        )
+        return
+
+    detalhes = []
+    lancamentos = resultado.get("lancamentos_excluidos", 0)
+    parcelas = resultado.get("parcelas_excluidas", 0)
+    if lancamentos:
+        detalhes.append(f"{lancamentos} lançamento(s) removido(s)")
+    if parcelas:
+        detalhes.append("controle de parcelas removido")
+    if resultado.get("metas_revertidas"):
+        detalhes.append("meta atualizada de volta")
+
+    detalhe_txt = " · ".join(detalhes)
+    descricao = resultado.get("descricao") or "transação"
+    await update.message.reply_text(
+        f"✅ Excluí *{descricao}* ({transacao_id}).\n_{detalhe_txt}_",
+        parse_mode="Markdown",
+    )
 
 
 async def callback_pagto(update: Update, context: ContextTypes.DEFAULT_TYPE):

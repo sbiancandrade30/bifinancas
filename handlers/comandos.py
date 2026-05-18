@@ -118,7 +118,7 @@ async def cmd_cartoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_parcelas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parcelas = sheets.buscar_parcelas()
+    parcelas = sheets.buscar_parcelas_ativas()
     if not parcelas:
         await update.message.reply_text(
             "Nenhuma parcela cadastrada.\n\n"

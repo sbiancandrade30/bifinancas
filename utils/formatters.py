@@ -1,6 +1,7 @@
 """
 utils/formatters.py — Formatação e helpers visuais
 """
+import calendar
 from datetime import datetime, date
 from config import FORMAS_PAGTO, PLANO_MENSAL
 
@@ -34,11 +35,23 @@ def mes_atual() -> str:
     return datetime.now().strftime("%Y-%m")
 
 
-def calcular_encerramento_parcela(n_parcelas: int) -> str:
-    hoje = date.today()
-    mes = hoje.month + n_parcelas - 1
-    ano = hoje.year + (mes - 1) // 12
-    mes = ((mes - 1) % 12) + 1
+def calcular_encerramento_parcela(n_parcelas: int, data_base=None) -> str:
+    """Retorna MM/AAAA do último mês da compra parcelada."""
+    if isinstance(data_base, str):
+        try:
+            base = datetime.strptime(data_base, "%d/%m/%Y").date()
+        except Exception:
+            base = date.today()
+    elif isinstance(data_base, datetime):
+        base = data_base.date()
+    elif isinstance(data_base, date):
+        base = data_base
+    else:
+        base = date.today()
+
+    mes_index = base.month - 1 + max(int(n_parcelas), 1) - 1
+    ano = base.year + mes_index // 12
+    mes = mes_index % 12 + 1
     return f"{mes:02d}/{ano}"
 
 

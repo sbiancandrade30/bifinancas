@@ -61,10 +61,25 @@ def plano_do_mes(mes_ano: str = None) -> dict:
 
 
 def dias_para_vencimento(dia_vencimento: int) -> int:
-    hoje = datetime.now().day
-    if dia_vencimento >= hoje:
-        return dia_vencimento - hoje
-    return 30 - hoje + dia_vencimento
+    """Calcula dias até o próximo vencimento usando o calendário real."""
+    hoje = date.today()
+    ano = hoje.year
+    mes = hoje.month
+    ultimo_dia_mes = calendar.monthrange(ano, mes)[1]
+    venc_dia = min(int(dia_vencimento), ultimo_dia_mes)
+    venc = date(ano, mes, venc_dia)
+
+    if venc < hoje:
+        if mes == 12:
+            ano += 1
+            mes = 1
+        else:
+            mes += 1
+        ultimo_dia_mes = calendar.monthrange(ano, mes)[1]
+        venc_dia = min(int(dia_vencimento), ultimo_dia_mes)
+        venc = date(ano, mes, venc_dia)
+
+    return (venc - hoje).days
 
 
 def score_emoji(nota: float) -> str:

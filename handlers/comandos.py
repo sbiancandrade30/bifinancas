@@ -3,11 +3,14 @@ handlers/comandos.py — Todos os comandos /saldo, /cartoes, /metas, etc.
 """
 import logging
 from datetime import datetime
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import sheets
 import ai_interpreter as ai
-from config import CARTOES, PLANO_MENSAL, LIMITES_ORCAMENTO
+from config import (
+    CARTOES, PLANO_MENSAL, LIMITES_ORCAMENTO, META_RESERVA,
+    DIVIDA_PAI_TOTAL, DIVIDA_MAE_TOTAL,
+)
 from utils.formatters import (fmt_brl, barra, emoji_pagto, emoji_status,
                                mes_atual, plano_do_mes, dias_para_vencimento,
                                score_emoji)
@@ -30,7 +33,7 @@ _"vale a pena comprar TV 2000 em 12x?"_
 *🎤 Também aceito áudio e foto de nota fiscal!*
 
 *📋 Comandos:*
-/saldo · /cartoes · /parcelas · /orcamento
+/saldo · /ultimos · /cartoes · /parcelas · /orcamento
 /metas · /reserva · /pais · /wishlist
 /score · /plano · /alertas
 /resumo · /relatorio · /ajuda"""
@@ -47,7 +50,8 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • _"comprei roupa 280 em 3x caedu"_
 • _"recebi salário 4820"_
 • _"guardei 200 na reserva"_
-• _"paguei 500 pra minha mãe"_
+• _"paguei 500 pro meu pai"_
+• _"paguei 300 pra minha mãe"_
 
 🎤 *Áudio:* mande um áudio falando o gasto
 📸 *Foto:* mande foto de nota fiscal ou comprovante
@@ -62,12 +66,13 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📊 *Consultas:*
 /saldo — saldo do mês atual
+/ultimos — últimos lançamentos com botão de excluir
 /cartoes — faturas e vencimentos
 /parcelas — parcelas ativas
 /orcamento — gastos vs limites
 /metas — todas as metas
 /reserva — reserva de emergência
-/pais — dívida com seus pais
+/pais — dívidas com pai e mãe
 /wishlist — lista de desejos
 /score — nota financeira do mês
 /plano — plano jun/26–jan/27
@@ -96,7 +101,46 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{emoji_status(pct_g)} Gastos: {pct_g:.0f}% do limite ({fmt_brl(limite_g)})\n"
            f"🎯 Meta poupança: *{fmt_brl(meta_g)}*\n"
            f"📊 {len(lst)} lançamento(s) registrados")
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    teclado = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧾 Ver últimos lançamentos", callback_data="showlast:8")]
+    ])
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=teclado)
+
+
+async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ultimos = sheets.buscar_ultimos_lancamentos(8)
+    if not ultimos:
+        await update.message.reply_text(
+            "Nenhum lançamento encontrado ainda."
+        )
+        return
+
+    for r in ultimos:
+        tid = str(r.get("ID", "")).strip().upper()
+        tipo = str(r.get("Tipo", ""))
+        sinal = "-" if tipo == "gasto" else "+"
+        emoji_tipo = "💸" if tipo == "gasto" else "💰"
+        descricao = r.get("Descrição", "Lançamento")
+        valor = r.get("Valor", 0)
+        categoria = r.get("Categoria", "")
+        data = r.get("Data", "")
+        forma = r.get("Forma_Pagto", "")
+        parcela = r.get("Parcela", "")
+        parcela_txt = f" · Parcela {parcela}" if parcela else ""
+
+        msg = (
+            f"{emoji_tipo} *{descricao}*\n"
+            f"{sinal}{fmt_brl(valor)} · {categoria}\n"
+            f"{data} · {forma}{parcela_txt}"
+        )
+        if tid:
+            msg += f"\nID: *{tid}*"
+            teclado = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Excluir este lançamento", callback_data=f"delask:{tid}")]
+            ])
+        else:
+            teclado = None
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=teclado)
 
 
 async def cmd_cartoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -165,7 +209,7 @@ async def cmd_metas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_reserva(update: Update, context: ContextTypes.DEFAULT_TYPE):
     atual = sheets.buscar_meta_valor("reserva")
-    meta  = 10000.0
+    meta  = META_RESERVA
     falta = meta - atual
     pct   = atual / meta * 100
     mes   = mes_atual()
@@ -184,21 +228,35 @@ async def cmd_reserva(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_pais(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pago  = sheets.buscar_meta_valor("pais")
-    total = 19400.0
-    falta = total - pago
-    pct   = pago / total * 100
+    pago_pai = sheets.buscar_meta_valor("dívida com o pai")
+    pago_mae = sheets.buscar_meta_valor("dívida com a mãe")
 
-    msg = (f"👨‍👩‍👧 *Dívida com seus pais*\n\n"
-           f"{barra(pago, total)} *{pct:.0f}% pago*\n"
-           f"Pago:  *{fmt_brl(pago)}*\n"
-           f"Total: *{fmt_brl(total)}*\n"
-           f"Falta: *{fmt_brl(falta)}*\n\n"
-           f"📅 Plano: começar R$ 500/mês em out/26\n"
-           f"   → quitação estimada: ago/28 🎯\n\n"
-           f"_Para registrar: 'paguei 500 pra minha mãe'_")
+    falta_pai = max(DIVIDA_PAI_TOTAL - pago_pai, 0)
+    falta_mae = max(DIVIDA_MAE_TOTAL - pago_mae, 0)
+    pct_pai = pago_pai / DIVIDA_PAI_TOTAL * 100 if DIVIDA_PAI_TOTAL else 0
+    pct_mae = pago_mae / DIVIDA_MAE_TOTAL * 100 if DIVIDA_MAE_TOTAL else 0
+
+    total_geral = DIVIDA_PAI_TOTAL + DIVIDA_MAE_TOTAL
+    pago_geral = pago_pai + pago_mae
+    falta_geral = falta_pai + falta_mae
+
+    msg = (
+        "👨‍👩‍👧 *Dívidas familiares*\n\n"
+        f"👨 *Pai*\n"
+        f"{barra(pago_pai, DIVIDA_PAI_TOTAL)} *{pct_pai:.0f}% pago*\n"
+        f"Pago:  *{fmt_brl(pago_pai)}*\n"
+        f"Total: *{fmt_brl(DIVIDA_PAI_TOTAL)}*\n"
+        f"Falta: *{fmt_brl(falta_pai)}*\n\n"
+        f"👩 *Mãe*\n"
+        f"{barra(pago_mae, DIVIDA_MAE_TOTAL)} *{pct_mae:.0f}% pago*\n"
+        f"Pago:  *{fmt_brl(pago_mae)}*\n"
+        f"Total: *{fmt_brl(DIVIDA_MAE_TOTAL)}*\n"
+        f"Falta: *{fmt_brl(falta_mae)}*\n\n"
+        f"📌 *Prioridade atual:* quitar a dívida com o pai primeiro\n"
+        f"🧾 Total familiar: *{fmt_brl(pago_geral)}* de *{fmt_brl(total_geral)}* · falta *{fmt_brl(falta_geral)}*\n\n"
+        f"_Para registrar: 'paguei 500 pro meu pai'_\n"
+        f"_Depois: 'paguei 300 pra minha mãe'_")
     await update.message.reply_text(msg, parse_mode="Markdown")
-
 
 async def cmd_orcamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mes = mes_atual()
@@ -281,9 +339,9 @@ async def cmd_plano(update: Update, context: ContextTypes.DEFAULT_TYPE):
     linhas += [
         "\n🎯 *Marcos importantes:*",
         "• Jun/26 — último seguro da moto",
-        "• Out/26 — começar pagar pais R$ 500/mês",
+        "• Out/26 — começar pagar a dívida com o pai R$ 500/mês",
         "• Nov/26 — último seguro do carro",
-        "• Jan/27 — pagar pais R$ 1.000/mês + investir",
+        "• Jan/27 — acelerar a quitação do pai; depois iniciar a dívida com a mãe",
     ]
     await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
 

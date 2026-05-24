@@ -15,8 +15,10 @@ ALLOWED_USER_ID     = int(os.environ.get("ALLOWED_USER_ID", "0"))
 RENDA_MENSAL = 4820.0
 RESERVA_INICIAL = 2000.0
 META_RESERVA = 10000.0
-DIVIDA_PAIS_TOTAL = 19400.0
-DIVIDA_PAIS_PAGO = 1000.0
+DIVIDA_PAI_TOTAL = 5400.0
+DIVIDA_PAI_PAGO = 1000.0
+DIVIDA_MAE_TOTAL = 15000.0
+DIVIDA_MAE_PAGO = 0.0
 
 # ─── PLANO FINANCEIRO MÊS A MÊS ──────────────────────────────────────────────
 PLANO_MENSAL = {
@@ -44,7 +46,8 @@ CATEGORIAS = [
     "Alimentação", "Mercado", "Transporte/Gasolina", "Moradia",
     "Saúde/Farmácia", "Roupas/Beleza", "Lazer/Saídas", "Assinaturas",
     "Educação", "Parcela/Crédito", "Seguro", "Salário", "VA/VR",
-    "Renda Extra", "Transferência", "Outros"
+    "Renda Extra", "Transferência", "Reserva/Investimentos",
+    "Dívidas/Compromissos", "Outros"
 ]
 
 # ─── SUBCATEGORIAS ────────────────────────────────────────────────────────────
@@ -80,6 +83,7 @@ FORMAS_PAGTO = {
     "pix":          "⚡ Pix",
     "dinheiro":     "💵 Dinheiro",
     "ted":          "🏦 TED",
+    "nao_informado": "🏦 Recebimento não informado",
 }
 
 # ─── PALAVRAS-CHAVE PARA PARSER LOCAL ────────────────────────────────────────

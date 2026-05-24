@@ -110,7 +110,11 @@ def garantir_abas():
 
 
 def _garantir_metas_padrao(sh):
-    from config import RESERVA_INICIAL, META_RESERVA, DIVIDA_PAIS_TOTAL, DIVIDA_PAIS_PAGO
+    from config import (
+        RESERVA_INICIAL, META_RESERVA,
+        DIVIDA_PAI_TOTAL, DIVIDA_PAI_PAGO,
+        DIVIDA_MAE_TOTAL, DIVIDA_MAE_PAGO,
+    )
 
     ws = sh.worksheet("Metas")
     _garantir_cabecalhos(ws, ABAS["Metas"])
@@ -122,10 +126,30 @@ def _garantir_metas_padrao(sh):
             "Reserva de emergência", "poupança", META_RESERVA,
             RESERVA_INICIAL, "2027-06", "Em andamento"
         ])
-    if "dívida com os pais" not in nomes:
+    # Migração da versão antiga: havia uma única linha "Dívida com os pais".
+    # Agora o controle é separado entre pai e mãe.
+    pai_existe = "dívida com o pai" in nomes
+    mae_existe = "dívida com a mãe" in nomes
+
+    if "dívida com os pais" in nomes and not (pai_existe or mae_existe):
+        for idx, r in enumerate(registros, start=2):
+            if str(r.get("Nome", "")).strip().lower() == "dívida com os pais":
+                ws.delete_rows(idx)
+                break
+        registros = ws.get_all_records()
+        nomes = [str(r.get("Nome", "")).lower() for r in registros]
+        pai_existe = "dívida com o pai" in nomes
+        mae_existe = "dívida com a mãe" in nomes
+
+    if not pai_existe:
         ws.append_row([
-            "Dívida com os pais", "dívida", DIVIDA_PAIS_TOTAL,
-            DIVIDA_PAIS_PAGO, "2028-08", "Em andamento"
+            "Dívida com o pai", "dívida", DIVIDA_PAI_TOTAL,
+            DIVIDA_PAI_PAGO, "2027-03", "Em andamento"
+        ])
+    if not mae_existe:
+        ws.append_row([
+            "Dívida com a mãe", "dívida", DIVIDA_MAE_TOTAL,
+            DIVIDA_MAE_PAGO, "2028-08", "Em andamento"
         ])
 
 
@@ -231,6 +255,35 @@ def buscar_todos_lancamentos():
         return []
 
 
+
+
+def buscar_ultimos_lancamentos(limite: int = 8):
+    """Retorna os últimos lançamentos agrupados por ID para permitir exclusão por botão.
+
+    Compras parceladas geram várias linhas com o mesmo ID; aqui mostramos só uma
+    entrada por transação, usando a linha mais recente encontrada.
+    """
+    try:
+        ws = get_sheet().worksheet("Lançamentos")
+        _garantir_cabecalhos(ws, ABAS["Lançamentos"])
+        regs = ws.get_all_records()
+        vistos = set()
+        ultimos = []
+        for r in reversed(regs):
+            tid = str(r.get("ID", "")).strip().upper()
+            chave = tid or f"sem-id-{len(regs)-len(ultimos)}"
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            ultimos.append(r)
+            if len(ultimos) >= limite:
+                break
+        return ultimos
+    except Exception as e:
+        logger.error("Erro ao buscar últimos lançamentos: %s", e)
+        return []
+
+
 def buscar_lancamentos_categoria(categoria: str, mes_ano: str = None):
     todos = buscar_lancamentos_mes(mes_ano) if mes_ano else buscar_todos_lancamentos()
     return [r for r in todos if r.get("Categoria", "") == categoria]
@@ -266,7 +319,7 @@ def excluir_transacao(transacao_id: str) -> dict:
             if not resultado["descricao"]:
                 resultado["descricao"] = str(r.get("Descrição", ""))
             meta = str(r.get("Meta", "")).strip().lower()
-            if meta in {"reserva", "pais"}:
+            if meta in {"reserva", "pai", "mae", "pais"}:
                 try:
                     ajustes_meta[meta] += float(r.get("Valor", 0) or 0)
                 except Exception:
@@ -293,11 +346,18 @@ def excluir_transacao(transacao_id: str) -> dict:
             if atualizar_meta("Reserva de emergência", novo):
                 resultado["metas_revertidas"].append("reserva")
 
-        if ajustes_meta.get("pais"):
-            atual = buscar_meta_valor("pais")
-            novo = max(0.0, atual - ajustes_meta["pais"])
-            if atualizar_meta("Dívida com os pais", novo):
-                resultado["metas_revertidas"].append("pais")
+        if ajustes_meta.get("pai") or ajustes_meta.get("pais"):
+            ajuste = ajustes_meta.get("pai", 0.0) + ajustes_meta.get("pais", 0.0)
+            atual = buscar_meta_valor("dívida com o pai")
+            novo = max(0.0, atual - ajuste)
+            if atualizar_meta("Dívida com o pai", novo):
+                resultado["metas_revertidas"].append("pai")
+
+        if ajustes_meta.get("mae"):
+            atual = buscar_meta_valor("dívida com a mãe")
+            novo = max(0.0, atual - ajustes_meta["mae"])
+            if atualizar_meta("Dívida com a mãe", novo):
+                resultado["metas_revertidas"].append("mãe")
 
         resultado["ok"] = bool(linhas_l or linhas_p)
         return resultado

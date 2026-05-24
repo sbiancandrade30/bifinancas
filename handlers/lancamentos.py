@@ -35,6 +35,21 @@ BOTOES_PAGTO = InlineKeyboardMarkup([
 ])
 
 
+def teclado_excluir(transacao_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Excluir lançamento", callback_data=f"delask:{transacao_id}")],
+    ])
+
+
+def teclado_confirmar_exclusao(transacao_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Sim, excluir", callback_data=f"delyes:{transacao_id}"),
+            InlineKeyboardButton("↩️ Cancelar", callback_data=f"delno:{transacao_id}"),
+        ]
+    ])
+
+
 async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
@@ -221,6 +236,8 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
     parcelas = int(dados.get("parcelas", 1))
     eh_reserva = dados.get("eh_reserva", False)
     eh_pais    = dados.get("eh_pais", False)
+    eh_pai     = dados.get("eh_pai", False)
+    eh_mae     = dados.get("eh_mae", False)
 
     # Processar data
     data_str = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
@@ -241,7 +258,7 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
             "subcategoria": subcategoria, "descricao": descricao,
             "valor": valor, "mes_ano": mes_ano, "parcelas": parcelas,
             "parcela_info": parcela_info, "eh_reserva": eh_reserva,
-            "eh_pais": eh_pais,
+            "eh_pais": eh_pais, "eh_pai": eh_pai, "eh_mae": eh_mae,
             "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
         }
         if parcelas > 1:
@@ -267,6 +284,7 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
         "valor": valor, "forma": forma, "mes_ano": mes_ano,
         "parcelas": parcelas, "parcela_info": parcela_info,
         "eh_reserva": eh_reserva, "eh_pais": eh_pais,
+        "eh_pai": eh_pai, "eh_mae": eh_mae,
         "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
     })
 
@@ -295,7 +313,14 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     valor_total = float(d["valor"])
     eh_parcelado = d["tipo"] == "gasto" and parcelas > 1
     valor_mes = round(valor_total / parcelas, 2) if eh_parcelado else valor_total
-    meta = "reserva" if d.get("eh_reserva") else ("pais" if d.get("eh_pais") else "")
+    if d.get("eh_reserva"):
+        meta = "reserva"
+    elif d.get("eh_mae"):
+        meta = "mae"
+    elif d.get("eh_pai") or d.get("eh_pais"):
+        meta = "pai"
+    else:
+        meta = ""
 
     if eh_parcelado:
         ok = sheets.salvar_lancamento_parcelado(
@@ -316,9 +341,13 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
             atual = sheets.buscar_meta_valor("reserva")
             sheets.atualizar_meta("Reserva de emergência", atual + valor_mes)
 
-        if d["tipo"] == "gasto" and d.get("eh_pais"):
-            atual = sheets.buscar_meta_valor("pais")
-            sheets.atualizar_meta("Dívida com os pais", atual + valor_mes)
+        if d["tipo"] == "gasto" and (d.get("eh_pai") or (d.get("eh_pais") and not d.get("eh_mae"))):
+            atual = sheets.buscar_meta_valor("dívida com o pai")
+            sheets.atualizar_meta("Dívida com o pai", atual + valor_mes)
+
+        if d["tipo"] == "gasto" and d.get("eh_mae"):
+            atual = sheets.buscar_meta_valor("dívida com a mãe")
+            sheets.atualizar_meta("Dívida com a mãe", atual + valor_mes)
 
         # Salva a compra parcelada em aba própria para acompanhamento de parcelas ativas.
         if eh_parcelado:
@@ -342,8 +371,10 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
         extras.append("🗓 *Impacto mensal:* as parcelas futuras já foram distribuídas nos próximos meses")
     if d.get("eh_reserva"):
         extras.append("🛡 *Reserva de emergência atualizada!*")
-    if d.get("eh_pais"):
-        extras.append("👨‍👩‍👧 *Dívida com os pais atualizada!*")
+    if d.get("eh_mae"):
+        extras.append("👩 *Dívida com a mãe atualizada!*")
+    elif d.get("eh_pai") or d.get("eh_pais"):
+        extras.append("👨 *Dívida com o pai atualizada!*")
     extras_str = ("\n" + "\n".join(extras)) if extras else ""
 
     if eh_parcelado:
@@ -380,10 +411,12 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
             "Tente enviar de novo. Se acontecer novamente, me avise para eu revisar a integração."
         )
 
+    reply_markup = teclado_excluir(tid) if ok else None
+
     if edit and hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.edit_message_text(msg, parse_mode="Markdown")
+        await update_or_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
     else:
-        await update_or_query.message.reply_text(msg, parse_mode="Markdown")
+        await update_or_query.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
 
 
 async def _processar_exclusao(update: Update, transacao_id: str):
@@ -411,6 +444,98 @@ async def _processar_exclusao(update: Update, transacao_id: str):
         f"✅ Excluí *{descricao}* ({transacao_id}).\n_{detalhe_txt}_",
         parse_mode="Markdown",
     )
+
+
+async def callback_atalhos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callbacks simples de navegação, como mostrar últimos lançamentos."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    if not data.startswith("showlast:"):
+        return
+
+    try:
+        limite = int(data.split(":", 1)[1])
+    except Exception:
+        limite = 8
+
+    ultimos = sheets.buscar_ultimos_lancamentos(limite)
+    if not ultimos:
+        await query.message.reply_text("Nenhum lançamento encontrado ainda.")
+        return
+
+    for r in ultimos:
+        tid = str(r.get("ID", "")).strip().upper()
+        tipo = str(r.get("Tipo", ""))
+        sinal = "-" if tipo == "gasto" else "+"
+        emoji_tipo = "💸" if tipo == "gasto" else "💰"
+        descricao = r.get("Descrição", "Lançamento")
+        valor = r.get("Valor", 0)
+        categoria = r.get("Categoria", "")
+        data_reg = r.get("Data", "")
+        forma = r.get("Forma_Pagto", "")
+        parcela = r.get("Parcela", "")
+        parcela_txt = f" · Parcela {parcela}" if parcela else ""
+        msg = (
+            f"{emoji_tipo} *{descricao}*\n"
+            f"{sinal}{fmt_brl(valor)} · {categoria}\n"
+            f"{data_reg} · {forma}{parcela_txt}"
+        )
+        teclado = None
+        if tid:
+            msg += f"\nID: *{tid}*"
+            teclado = teclado_excluir(tid)
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=teclado)
+
+
+async def callback_exclusao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback dos botões de exclusão com confirmação."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+
+    if data.startswith("delask:"):
+        transacao_id = data.split(":", 1)[1].upper()
+        await query.edit_message_text(
+            f"⚠️ *Confirmar exclusão*\n\n"
+            f"Deseja excluir a transação *{transacao_id}*?\n\n"
+            f"Se ela tiver parcelas futuras ou meta vinculada, o bot vai remover tudo e reverter a meta automaticamente.",
+            parse_mode="Markdown",
+            reply_markup=teclado_confirmar_exclusao(transacao_id),
+        )
+        return
+
+    if data.startswith("delno:"):
+        await query.edit_message_text("↩️ Exclusão cancelada.")
+        return
+
+    if data.startswith("delyes:"):
+        transacao_id = data.split(":", 1)[1].upper()
+        resultado = sheets.excluir_transacao(transacao_id)
+        if not resultado.get("ok"):
+            await query.edit_message_text(
+                f"Não encontrei uma transação com o identificador *{transacao_id}*.",
+                parse_mode="Markdown",
+            )
+            return
+
+        detalhes = []
+        lancamentos = resultado.get("lancamentos_excluidos", 0)
+        parcelas = resultado.get("parcelas_excluidas", 0)
+        if lancamentos:
+            detalhes.append(f"{lancamentos} lançamento(s) removido(s)")
+        if parcelas:
+            detalhes.append("controle de parcelas removido")
+        if resultado.get("metas_revertidas"):
+            detalhes.append("meta atualizada de volta")
+
+        detalhe_txt = " · ".join(detalhes) or "transação removida"
+        descricao = resultado.get("descricao") or "transação"
+        await query.edit_message_text(
+            f"✅ Excluí *{descricao}* ({transacao_id}).\n_{detalhe_txt}_",
+            parse_mode="Markdown",
+        )
+        return
 
 
 async def callback_pagto(update: Update, context: ContextTypes.DEFAULT_TYPE):

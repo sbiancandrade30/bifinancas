@@ -8,9 +8,16 @@ import re
 import logging
 import base64
 from datetime import datetime
-from config import GEMINI_API_KEY, CARTOES, CATEGORIAS, SUBCATEGORIAS
+from config import GEMINI_API_KEY, CARTOES, CATEGORIAS, SUBCATEGORIAS, RENDA_MENSAL
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_brl_local(valor: float) -> str:
+    try:
+        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return f"R$ {valor}"
 
 # ─── CLIENTE GEMINI ───────────────────────────────────────────────────────────
 try:
@@ -38,7 +45,7 @@ CARTÕES (use a chave exata):
 
 FORMAS DE PAGAMENTO válidas para "forma_pagto":
 - Chave do cartão: santander, nubank, mercadopago, caedu, bb
-- debito, pix, dinheiro, ted
+- debito, pix, dinheiro, ted, nao_informado
 - "perguntar" → se não ficou claro
 
 CATEGORIAS: {', '.join(CATEGORIAS)}
@@ -50,8 +57,13 @@ DETECÇÃO de forma de pagamento:
 - "no pix" / "via pix" → pix
 - "em dinheiro" / "espécie" → dinheiro
 - "no débito" → debito
-- valor alto (>200) sem menção → perguntar
-- valor pequeno (<50) sem menção → provavelmente pix ou dinheiro
+- gasto sem forma clara → perguntar
+- entrada sem forma clara → nao_informado
+
+DÍVIDAS FAMILIARES:
+- "pai", "meu pai", "papai" → eh_pai=true
+- "mãe", "minha mãe", "mamãe" → eh_mae=true
+- "pais" de forma genérica → eh_pai=true, porque a prioridade atual é quitar o pai primeiro
 
 Mensagem do usuário: "{texto}"
 
@@ -67,6 +79,8 @@ Responda APENAS com JSON válido (sem markdown, sem explicações):
   "parcelas": <inteiro, 1 se à vista>,
   "eh_reserva": <true/false>,
   "eh_pais": <true/false>,
+  "eh_pai": <true/false>,
+  "eh_mae": <true/false>,
   "wishlist_item": "<nome do item se wishlist>",
   "wishlist_prioridade": "alta" | "media" | "baixa",
   "simulador_descricao": "<o que quer comprar se simulador>",
@@ -144,28 +158,34 @@ def transcrever_audio(audio_bytes: bytes) -> str | None:
 
 def gerar_resumo_mes(lancamentos: list, mes_ano: str,
                      meta_guardar: float, limite_gastos: float) -> str:
-    """Gera análise do mês com IA."""
+    """Gera análise do mês com IA, com prompt compacto para economizar cota."""
+    gastos = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "gasto")
+    entradas = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "entrada")
+    saldo = entradas - gastos
+
+    por_categoria = {}
+    for r in lancamentos:
+        if r.get("Tipo") == "gasto":
+            cat = str(r.get("Categoria", "Outros"))
+            por_categoria[cat] = por_categoria.get(cat, 0.0) + float(r.get("Valor", 0) or 0)
+    top_categorias = sorted(por_categoria.items(), key=lambda x: x[1], reverse=True)[:5]
+
     if not GEMINI_OK:
         return _resumo_simples(lancamentos, mes_ano, meta_guardar)
 
-    gastos   = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "gasto")
-    entradas = sum(float(r["Valor"]) for r in lancamentos if r["Tipo"] == "entrada")
-    saldo    = entradas - gastos
-
     prompt = f"""Você é agente financeiro pessoal da Bianca. Analise o mês {mes_ano}.
+Resumo: entradas R${entradas:.2f}; gastos R${gastos:.2f}; saldo R${saldo:.2f}.
+Meta de poupança: R${meta_guardar:.2f}. Limite de gastos: R${limite_gastos:.2f}.
+Top categorias: {json.dumps(top_categorias, ensure_ascii=False)}.
+Quantidade de lançamentos: {len(lancamentos)}.
 
-Resumo: Entradas R${entradas:.2f} | Gastos R${gastos:.2f} | Saldo R${saldo:.2f}
-Meta poupança: R${meta_guardar:.2f} | Limite gastos: R${limite_gastos:.2f}
-Lançamentos: {json.dumps(lancamentos[:60], ensure_ascii=False)}
-
-Gere resumo com:
-1. 📊 Visão geral (entradas, gastos, saldo, vs meta)
-2. 🏷 Top 5 categorias com valores
-3. 🎯 Comparação com o plano financeiro
-4. ⚠️ Alertas (algo fora do padrão?)
-5. 💡 1 conselho prático personalizado
-
-Tom: informal, direto, use emojis. Máx 28 linhas."""
+Entregue em no máximo 18 linhas:
+1. visão geral
+2. leitura dos gastos
+3. comparação com a meta
+4. alerta principal, se houver
+5. um conselho prático bem específico.
+Tom direto, natural e humano."""
     try:
         resp = _model_text.generate_content(prompt)
         return resp.text
@@ -173,66 +193,92 @@ Tom: informal, direto, use emojis. Máx 28 linhas."""
         logger.error(f"Gemini resumo erro: {e}")
         return _resumo_simples(lancamentos, mes_ano, meta_guardar)
 
-
 def gerar_relatorio_completo(todos: list) -> str:
-    """Gera relatório geral com IA."""
-    if not GEMINI_OK:
-        return "❌ IA indisponível. Acesse sua planilha Google Sheets para o relatório completo."
+    """Gera relatório geral; se a IA limitar, entrega relatório útil sem falhar."""
+    if not todos:
+        return "Nenhum lançamento ainda. 📭"
 
-    gastos   = sum(float(r["Valor"]) for r in todos if r["Tipo"] == "gasto")
+    gastos = sum(float(r["Valor"]) for r in todos if r["Tipo"] == "gasto")
     entradas = sum(float(r["Valor"]) for r in todos if r["Tipo"] == "entrada")
-    prompt = f"""Agente financeiro da Bianca. Relatório completo.
-Registros: {len(todos)} | Gastos: R${gastos:.2f} | Entradas: R${entradas:.2f}
-Dados: {json.dumps(todos[:80], ensure_ascii=False)}
+    saldo = entradas - gastos
 
-Relatório com: 1) Visão geral 2) Por mês 3) Por categoria
-4) Progresso metas 5) Análise de hábitos 6) 3 recomendações personalizadas.
-Analítico, use números, máx 38 linhas."""
+    por_mes = {}
+    por_categoria = {}
+    for r in todos:
+        mes = str(r.get("Mês", "Sem mês"))
+        tipo = str(r.get("Tipo", ""))
+        valor = float(r.get("Valor", 0) or 0)
+        item = por_mes.setdefault(mes, {"entradas": 0.0, "gastos": 0.0})
+        if tipo == "entrada":
+            item["entradas"] += valor
+        elif tipo == "gasto":
+            item["gastos"] += valor
+            cat = str(r.get("Categoria", "Outros"))
+            por_categoria[cat] = por_categoria.get(cat, 0.0) + valor
+
+    meses_resumo = [
+        [mes, round(v["entradas"], 2), round(v["gastos"], 2), round(v["entradas"] - v["gastos"], 2)]
+        for mes, v in sorted(por_mes.items())
+    ]
+    top_categorias = sorted(por_categoria.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    fallback = _relatorio_simples(todos, gastos, entradas, saldo, meses_resumo, top_categorias)
+    if not GEMINI_OK:
+        return fallback
+
+    prompt = f"""Agente financeiro da Bianca. Gere um relatório financeiro geral compacto.
+Registros: {len(todos)}. Entradas: R${entradas:.2f}. Gastos: R${gastos:.2f}. Saldo: R${saldo:.2f}.
+Meses [mês, entradas, gastos, saldo]: {json.dumps(meses_resumo[-8:], ensure_ascii=False)}
+Top categorias: {json.dumps(top_categorias, ensure_ascii=False)}
+
+Estrutura:
+1. visão geral
+2. evolução por mês
+3. categorias que mais pesaram
+4. hábitos percebidos
+5. três recomendações práticas.
+Máximo 28 linhas. Sem enrolação."""
     try:
         resp = _model_text.generate_content(prompt)
         return resp.text
     except Exception as e:
         logger.error(f"Gemini relatório erro: {e}")
-        return "❌ Erro ao gerar relatório. Tente novamente."
-
+        return fallback
 
 def simular_compra(descricao: str, valor_total: float, parcelas: int,
                    lancamentos_mes: list, plano_mes: dict) -> str:
-    """Simula impacto de uma compra parcelada no orçamento."""
-    if not GEMINI_OK:
-        valor_parcela = valor_total / parcelas
-        return (f"💳 *Simulação: {descricao}*\n"
-                f"Valor total: R$ {valor_total:.2f}\n"
-                f"Parcela: R$ {valor_parcela:.2f}/mês por {parcelas} meses\n"
-                f"⚠️ Analise se cabe no seu orçamento antes de decidir.")
-
+    """Simula impacto da compra sem depender da IA."""
+    parcelas = max(int(parcelas or 1), 1)
+    valor_total = float(valor_total or 0)
+    valor_parcela = valor_total / parcelas if parcelas else valor_total
     gastos_atuais = sum(float(r["Valor"]) for r in lancamentos_mes if r["Tipo"] == "gasto")
-    limite = plano_mes.get("limite_gastos", 2000)
-    guardar = plano_mes.get("guardar", 0)
+    limite = float(plano_mes.get("limite_gastos", 2000) or 2000)
+    guardar = float(plano_mes.get("guardar", 0) or 0)
 
-    prompt = f"""Bianca está pensando em comprar: {descricao}
-Valor total: R${valor_total:.2f} | Parcelas: {parcelas}x de R${valor_total/parcelas:.2f}
+    gasto_com_compra = gastos_atuais + valor_parcela
+    restante_limite = limite - gastos_atuais
+    restante_apos = limite - gasto_com_compra
+    folga_teorica = RENDA_MENSAL - guardar - gasto_com_compra
 
-Situação atual do mês:
-- Gastos até agora: R${gastos_atuais:.2f}
-- Limite mensal: R${limite:.2f}
-- Meta de poupança: R${guardar:.2f}
-- Renda mensal: R$4.820,00
+    if gasto_com_compra > limite:
+        veredito = "❌ *Eu esperaria.* A parcela estoura o limite de gastos do mês."
+    elif restante_apos < limite * 0.10:
+        veredito = "⚠️ *Dá, mas fica apertado.* Você termina o mês com pouca margem no limite."
+    else:
+        veredito = "✅ *Cabe no plano mensal atual*, desde que os próximos meses sigam parecidos."
 
-Analise:
-1. Cabe no orçamento atual?
-2. Impacto nos próximos {parcelas} meses
-3. Melhor momento para comprar (agora ou quando?)
-4. Recomendação final clara (sim/não/esperar)
-
-Seja direta, use números reais, máx 15 linhas."""
-    try:
-        resp = _model_text.generate_content(prompt)
-        return resp.text
-    except Exception as e:
-        logger.error(f"Gemini simulação erro: {e}")
-        return f"Parcela seria R$ {valor_total/parcelas:.2f}/mês por {parcelas} meses."
-
+    prazo_txt = "à vista" if parcelas == 1 else f"por {parcelas} meses"
+    return (
+        f"🔢 *Simulação: {descricao}*\n\n"
+        f"💳 Valor total: *{_fmt_brl_local(valor_total)}*\n"
+        f"📦 Parcela: *{_fmt_brl_local(valor_parcela)}/mês* {prazo_txt}\n\n"
+        f"📊 Gastos atuais do mês: *{_fmt_brl_local(gastos_atuais)}*\n"
+        f"📌 Limite planejado: *{_fmt_brl_local(limite)}*\n"
+        f"🧮 Gastos com essa compra: *{_fmt_brl_local(gasto_com_compra)}*\n"
+        f"💡 Margem no limite depois: *{_fmt_brl_local(restante_apos)}*\n"
+        f"🎯 Meta de poupança do mês: *{_fmt_brl_local(guardar)}*\n\n"
+        f"{veredito}"
+    )
 
 def calcular_score(lancamentos: list, mes_ano: str,
                    meta_guardar: float, limite_gastos: float) -> dict:
@@ -299,7 +345,7 @@ COMO REGISTRAR:
 SITUAÇÃO FINANCEIRA DA BIANCA:
 - Renda: R$ 4.820/mês
 - Reserva de emergência: meta R$ 10.000
-- Dívida com os pais: R$ 19.400 (pagou R$ 1.000)
+- Dívidas familiares: pai R$ 5.400 (R$ 1.000 já pago) e mãe R$ 15.000 (pagamento começa depois de quitar o pai)
 - 5 cartões com faturas mensais
 - Plano financeiro até jan/2027
 {ctx}
@@ -320,7 +366,7 @@ Responda de forma:
         return resp.text
     except Exception as e:
         logger.error(f"Gemini dúvida erro: {e}")
-        return "❌ Não consegui processar sua pergunta agora. Tente novamente."
+        return "❌ Não consegui processar agora. A IA pode ter atingido o limite gratuito; tente de novo em alguns segundos."
 
 
 def classificar_intencao(texto: str) -> str:
@@ -329,6 +375,15 @@ def classificar_intencao(texto: str) -> str:
     Usa regras locais primeiro para economizar chamadas à IA.
     """
     t = texto.lower().strip()
+
+    # Sinais claros de lançamento que podem vir em formato de pergunta.
+    lancamentos_especiais = [
+        "vale a pena", "devo comprar", "consigo comprar", "quero comprar",
+        "wishlist", "lista de desejos", "guardei", "poupei", "paguei",
+        "recebi", "gastei", "comprei",
+    ]
+    if any(p in t for p in lancamentos_especiais):
+        return "lancamento"
 
     # Sinais claros de dúvida/pergunta
     palavras_pergunta = [
@@ -362,6 +417,35 @@ def classificar_intencao(texto: str) -> str:
 
     # Incerto — vai para IA decidir
     return "incerto"
+
+
+def _relatorio_simples(todos, gastos, entradas, saldo, meses_resumo, top_categorias) -> str:
+    linhas = [
+        "📘 *Relatório geral — BiFinanças*",
+        "",
+        f"➕ Entradas acumuladas: *{_fmt_brl_local(entradas)}*",
+        f"➖ Gastos acumulados: *{_fmt_brl_local(gastos)}*",
+        f"💰 Saldo acumulado: *{_fmt_brl_local(saldo)}*",
+        f"📌 Lançamentos analisados: *{len(todos)}*",
+        "",
+        "📅 *Por mês:*",
+    ]
+    for mes, ent, gas, sal in meses_resumo[-6:]:
+        linhas.append(f"• {mes}: +{_fmt_brl_local(ent)} · -{_fmt_brl_local(gas)} · saldo {_fmt_brl_local(sal)}")
+    linhas.append("")
+    linhas.append("🏷 *Categorias com maior gasto:*")
+    if top_categorias:
+        for cat, val in top_categorias[:5]:
+            linhas.append(f"• {cat}: {_fmt_brl_local(val)}")
+    else:
+        linhas.append("• Nenhum gasto categorizado ainda")
+    linhas += [
+        "",
+        "💡 *Leitura rápida:*",
+        "• Este relatório foi gerado localmente para não depender da cota da IA.",
+        "• Quanto mais lançamentos você registrar, melhor ficam as análises.",
+    ]
+    return "\n".join(linhas)
 
 
 def _resumo_simples(lancamentos, mes_ano, meta_guardar) -> str:

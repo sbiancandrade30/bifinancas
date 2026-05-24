@@ -401,8 +401,7 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
         f"{extras_str}\n\n"
         f"{'—' * 20}\n"
         f"{saldo_emoji} *Saldo atual:* {fmt_brl(saldo_info['saldo'])}\n"
-        f"_Entradas: {fmt_brl(saldo_info['entradas'])} · Gastos: {fmt_brl(saldo_info['gastos'])}_\n\n"
-        f"❌ Para excluir diga: *\"Excluir transação {tid}\"*"
+        f"_Entradas: {fmt_brl(saldo_info['entradas'])} · Gastos: {fmt_brl(saldo_info['gastos'])}_"
     )
 
     if not ok:

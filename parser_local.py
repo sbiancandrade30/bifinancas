@@ -59,7 +59,7 @@ def extrair_valor(texto: str) -> float | None:
                 continue
 
     # Número inteiro solto, ignorando o N de "12x".
-    numeros = re.findall(r"(?<![\dx])(\d{2,6})(?!\s*[xX]|\d)", t)
+    numeros = re.findall(r"(?<![\dx])(\d{1,6})(?!\s*[xX]|\d)", t)
     for n in numeros:
         try:
             return float(n)
@@ -173,7 +173,7 @@ def _remover_valor_e_parcelas(texto: str) -> str:
     t = re.sub(r"\bem\s*\d+\s*[xX]\b", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\b\d+\s*(?:vezes|parcelas?)\b", "", t, flags=re.IGNORECASE)
     # Remove um valor inteiro principal restante, mas só se houver contexto financeiro explícito.
-    t = re.sub(r"\b\d{2,6}\b", "", t, count=1)
+    t = re.sub(r"\b\d{1,6}\b", "", t, count=1)
     return t
 
 

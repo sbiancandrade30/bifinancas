@@ -23,8 +23,9 @@ SCOPES = [
 # As novas colunas ficam no final para não quebrar a leitura existente.
 ABAS = {
     "Lançamentos": [
-        "Data", "Tipo", "Categoria", "Subcategoria", "Descrição", "Valor",
-        "Forma_Pagto", "Mês", "Parcela", "ID", "Valor_Total", "Meta"
+        "Data", "Tipo", "Categoria", "Subcategoria", "Descrição",
+        "Valor", "Forma_Pagto", "Mês", "Mês_Fatura", "Parcela", "ID",
+        "Valor_Total", "Meta"
     ],
     "Cartões": ["Cartão", "Fatura_Atual", "Vencimento", "Atualizado_Em"],
     "Metas": ["Nome", "Tipo", "Valor_Meta", "Valor_Atual", "Prazo", "Status"],
@@ -186,14 +187,16 @@ def _diferenca_meses(mes_inicio: str, mes_ref: str) -> int | None:
 
 def salvar_lancamento(
     data, tipo, categoria, subcategoria, descricao, valor, forma_pagto, mes,
-    parcela="", transacao_id="", valor_total=None, meta=""
+    mes_fatura=None, parcela="", transacao_id="", valor_total=None, meta=""
 ):
     try:
         ws = get_sheet().worksheet("Lançamentos")
         _garantir_cabecalhos(ws, ABAS["Lançamentos"])
+        if not mes_fatura:
+            mes_fatura = mes
         ws.append_row([
             data, tipo, categoria, subcategoria, descricao,
-            float(valor), forma_pagto, mes, parcela, transacao_id,
+            float(valor), forma_pagto, mes, mes_fatura, parcela, transacao_id,
             float(valor_total if valor_total is not None else valor), meta,
         ])
         return True
@@ -223,7 +226,7 @@ def salvar_lancamento_parcelado(
             mes_parcela = data_parcela.strftime("%Y-%m")
             rows.append([
                 data_parcela.strftime("%d/%m/%Y"), tipo, categoria, subcategoria,
-                descricao, float(valor_parcela), forma_pagto, mes_parcela,
+                descricao, float(valor_parcela), forma_pagto, mes_parcela, mes_parcela,
                 f"{idx}/{total_parcelas}", transacao_id, float(valor_total),
                 meta if idx == 1 else "",
             ])

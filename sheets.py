@@ -187,7 +187,7 @@ def _diferenca_meses(mes_inicio: str, mes_ref: str) -> int | None:
 
 def salvar_lancamento(
     data, tipo, categoria, subcategoria, descricao, valor, forma_pagto, mes,
-    mes_fatura=None, parcela="", transacao_id="", valor_total=None, meta=""
+    parcela="", transacao_id="", valor_total=None, meta="", mes_fatura=None
 ):
     try:
         ws = get_sheet().worksheet("Lançamentos")

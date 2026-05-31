@@ -1,3 +1,12 @@
+import os
+import json
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or 0)
+
 CARTOES = {
     "santander": {
         "nome": "Santander Free",

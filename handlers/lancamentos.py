@@ -2,35 +2,122 @@
 handlers/lancamentos.py — Registro de gastos e entradas
 Suporta: texto, foto de nota fiscal, áudio
 """
+
 import logging
+import random
 import re
+import string
 from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-import parser_local
+
 import ai_interpreter as ai
+import parser_local
 import sheets
 from config import CARTOES, FORMAS_PAGTO
-from utils.formatters import fmt_brl, emoji_pagto, calcular_encerramento_parcela, mes_atual
+from utils.formatters import (
+    fmt_brl,
+    emoji_pagto,
+    calcular_encerramento_parcela,
+    mes_atual,
+)
 
 logger = logging.getLogger(__name__)
 
+
+def _normalizar_txt(valor: str) -> str:
+    """Normaliza texto para comparar cartão/forma de pagamento."""
+    return (
+        str(valor or "")
+        .lower()
+        .strip()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+        .replace(".", "")
+    )
+
+
+def _proximo_mes(mes_ano: str) -> str:
+    ano, mes = map(int, mes_ano.split("-"))
+
+    if mes == 12:
+        return f"{ano + 1}-01"
+
+    return f"{ano}-{mes + 1:02d}"
+
+
+def _identificar_cartao_por_forma(forma_pagto: str):
+    """
+    Identifica se a forma de pagamento é um cartão cadastrado no config.py.
+    Aceita chave, nome, final e aliases.
+    """
+    forma_norm = _normalizar_txt(forma_pagto)
+
+    for chave, dados in CARTOES.items():
+        nomes = [
+            chave,
+            dados.get("nome", ""),
+            dados.get("final", ""),
+            *dados.get("aliases", []),
+        ]
+
+        for nome in nomes:
+            nome_norm = _normalizar_txt(nome)
+            if nome_norm and nome_norm in forma_norm:
+                return dados
+
+    return None
+
+
+def calcular_mes_fatura(data_str: str, forma_pagto: str, mes_compra: str) -> str:
+    """
+    Calcula o mês da fatura.
+
+    Regra:
+    - Se não for cartão: Mês_Fatura = Mês da compra
+    - Se for cartão e passou do fechamento: Mês_Fatura = próximo mês
+    - Se for cartão e ainda não passou do fechamento: Mês_Fatura = mês da compra
+    """
+    cartao = _identificar_cartao_por_forma(forma_pagto)
+
+    if not cartao:
+        return mes_compra
+
+    fechamento = cartao.get("fechamento")
+
+    if not fechamento:
+        return mes_compra
+
+    try:
+        data_obj = datetime.strptime(data_str, "%d/%m/%Y")
+        fechamento = int(fechamento)
+    except Exception:
+        return mes_compra
+
+    if data_obj.day > fechamento:
+        return _proximo_mes(mes_compra)
+
+    return mes_compra
+
+
 BOTOES_PAGTO = InlineKeyboardMarkup([
     [
-        InlineKeyboardButton("💜 Nubank",        callback_data="pagto:nubank"),
-        InlineKeyboardButton("💳 Santander",     callback_data="pagto:santander"),
+        InlineKeyboardButton("💜 Nubank", callback_data="pagto:nubank"),
+        InlineKeyboardButton("💳 Santander", callback_data="pagto:santander"),
     ],
     [
-        InlineKeyboardButton("💛 Mercado Pago",  callback_data="pagto:mercadopago"),
-        InlineKeyboardButton("🟢 Caedu",         callback_data="pagto:caedu"),
+        InlineKeyboardButton("💛 Mercado Pago", callback_data="pagto:mercadopago"),
+        InlineKeyboardButton("🟢 Caedu", callback_data="pagto:caedu"),
     ],
     [
         InlineKeyboardButton("💛 Banco do Brasil", callback_data="pagto:bb"),
-        InlineKeyboardButton("💳 Débito",        callback_data="pagto:debito"),
+        InlineKeyboardButton("💳 Débito", callback_data="pagto:debito"),
     ],
     [
-        InlineKeyboardButton("⚡ Pix",           callback_data="pagto:pix"),
-        InlineKeyboardButton("💵 Dinheiro",      callback_data="pagto:dinheiro"),
+        InlineKeyboardButton("⚡ Pix", callback_data="pagto:pix"),
+        InlineKeyboardButton("💵 Dinheiro", callback_data="pagto:dinheiro"),
     ],
 ])
 
@@ -52,7 +139,8 @@ def teclado_confirmar_exclusao(transacao_id: str) -> InlineKeyboardMarkup:
 
 async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
+        chat_id=update.effective_chat.id,
+        action="typing",
     )
 
     # Exclusão por identificador, antes de passar por IA/parser.
@@ -61,6 +149,7 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         texto,
         flags=re.IGNORECASE,
     )
+
     if match_exclusao:
         await _processar_exclusao(update, match_exclusao.group(1).upper())
         return
@@ -76,7 +165,6 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         return
 
     # 3. Se for lançamento ou incerto — tenta registrar
-    # Primeiro tenta parser local (grátis, instantâneo)
     dados = parser_local.parse(texto)
 
     # Se não conseguiu, chama Gemini
@@ -85,7 +173,6 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     # Se o Gemini também não conseguiu reconhecer como lançamento
     if not dados:
-        # Última chance: trata como dúvida
         contexto_mes = _calcular_saldo_mes(mes_atual())
         resposta = ai.responder_duvida(texto, contexto_mes)
         await update.message.reply_text(resposta, parse_mode="Markdown")
@@ -94,8 +181,6 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     tipo = dados.get("tipo", "invalido")
 
     if tipo == "invalido":
-        # Pode ser uma dúvida disfarçada — responde como assistente
-        msg_invalido = dados.get("mensagem", "")
         contexto_mes = _calcular_saldo_mes(mes_atual())
         resposta = ai.responder_duvida(texto, contexto_mes)
         await update.message.reply_text(resposta, parse_mode="Markdown")
@@ -118,18 +203,18 @@ async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Extrai valor, estabelecimento, data e itens automaticamente.
     """
     await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
+        chat_id=update.effective_chat.id,
+        action="typing",
     )
+
     await update.message.reply_text(
         "📸 Lendo a imagem... pode levar alguns segundos."
     )
 
-    # Baixa a foto em maior resolução
     photo = update.message.photo[-1]
-    file  = await context.bot.get_file(photo.file_id)
+    file = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
 
-    # Verifica se tem legenda (ex: "nota do mercado de ontem")
     legenda = update.message.caption or ""
 
     dados = ai.interpretar_imagem(image_bytes)
@@ -144,29 +229,26 @@ async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    tipo_img    = dados.get("tipo_imagem", "")
-    valor       = float(dados.get("valor", 0))
-    descricao   = dados.get("descricao", "")
-    categoria   = dados.get("categoria", "Outros")
-    data_str    = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
-    forma       = dados.get("forma_pagto", "perguntar")
-    itens       = dados.get("itens", [])
-    confirmacao = dados.get("confirmacao", f"Imagem lida! {fmt_brl(valor)}")
+    tipo_img = dados.get("tipo_imagem", "")
+    valor = float(dados.get("valor", 0))
+    descricao = dados.get("descricao", "")
+    categoria = dados.get("categoria", "Outros")
+    data_str = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
+    forma = dados.get("forma_pagto", "perguntar")
+    itens = dados.get("itens", [])
 
-    # Ícone do tipo de imagem
     icone_tipo = {
-        "nota_fiscal":       "🧾",
-        "comprovante_pix":   "⚡",
-        "extrato":           "📋",
-        "fatura":            "💳",
+        "nota_fiscal": "🧾",
+        "comprovante_pix": "⚡",
+        "extrato": "📋",
+        "fatura": "💳",
     }.get(tipo_img, "📸")
 
-    # Monta preview do que foi lido
     itens_str = ""
     if itens:
         itens_str = "\n\n*Itens identificados:*\n" + "\n".join(f"  • {i}" for i in itens[:8])
         if len(itens) > 8:
-            itens_str += f"\n  _... e mais {len(itens)-8} itens_"
+            itens_str += f"\n  _... e mais {len(itens) - 8} itens_"
 
     legenda_str = f"\n📝 _Contexto: {legenda}_" if legenda else ""
 
@@ -180,18 +262,18 @@ async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{itens_str}\n\n"
         f"_Salvando..._"
     )
+
     await update.message.reply_text(preview, parse_mode="Markdown")
 
-    # Se tem legenda, usa para refinar a interpretação
     if legenda and not dados.get("forma_pagto"):
         dados_legenda = ai.interpretar_texto(legenda)
         if dados_legenda and dados_legenda.get("forma_pagto"):
             forma = dados_legenda.get("forma_pagto", forma)
 
     dados["forma_pagto"] = forma
-    dados["descricao"]   = descricao or legenda[:50] or "Nota fiscal"
-    dados["eh_reserva"]  = False
-    dados["eh_pais"]     = False
+    dados["descricao"] = descricao or legenda[:50] or "Nota fiscal"
+    dados["eh_reserva"] = False
+    dados["eh_pais"] = False
     dados["subcategoria"] = dados.get("subcategoria", "")
 
     await _finalizar_lancamento(update, context, dados, legenda or "foto")
@@ -200,8 +282,10 @@ async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa mensagem de voz."""
     await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
+        chat_id=update.effective_chat.id,
+        action="typing",
     )
+
     await update.message.reply_text("🎤 Ouvindo...")
 
     voice = update.message.voice
@@ -209,6 +293,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audio_bytes = await file.download_as_bytearray()
 
     transcricao = ai.transcrever_audio(bytes(audio_bytes))
+
     if not transcricao:
         await update.message.reply_text(
             "❌ Não consegui entender o áudio. Tente digitar o lançamento."
@@ -216,6 +301,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(f"🎤 _\"{transcricao}\"_", parse_mode="Markdown")
+
     dados = ai.interpretar_audio_transcrito(transcricao)
 
     if not dados:
@@ -227,26 +313,27 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _finalizar_lancamento(update, context, dados, texto_original):
     """Salva o lançamento ou pergunta a forma de pagamento."""
-    tipo     = dados.get("tipo", "gasto")
-    valor    = float(dados.get("valor", 0))
+    tipo = dados.get("tipo", "gasto")
+    valor = float(dados.get("valor", 0))
     categoria = dados.get("categoria", "Outros")
     subcategoria = dados.get("subcategoria", "")
     descricao = dados.get("descricao", texto_original[:50])
-    forma    = dados.get("forma_pagto", "perguntar")
+    forma = dados.get("forma_pagto", "perguntar")
     parcelas = int(dados.get("parcelas", 1))
     eh_reserva = dados.get("eh_reserva", False)
-    eh_pais    = dados.get("eh_pais", False)
-    eh_pai     = dados.get("eh_pai", False)
-    eh_mae     = dados.get("eh_mae", False)
+    eh_pais = dados.get("eh_pais", False)
+    eh_pai = dados.get("eh_pai", False)
+    eh_mae = dados.get("eh_mae", False)
 
     # Processar data
     data_str = dados.get("data", datetime.now().strftime("%d/%m/%Y"))
+
     try:
         data_obj = datetime.strptime(data_str, "%d/%m/%Y")
-        mes_ano  = data_obj.strftime("%Y-%m")
-    except:
+        mes_ano = data_obj.strftime("%Y-%m")
+    except Exception:
         data_obj = datetime.now()
-        mes_ano  = data_obj.strftime("%Y-%m")
+        mes_ano = data_obj.strftime("%Y-%m")
         data_str = data_obj.strftime("%d/%m/%Y")
 
     parcela_info = f"1/{parcelas}" if parcelas > 1 else ""
@@ -254,13 +341,22 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
     # Se forma não foi detectada, pergunta com botões
     if forma == "perguntar" and tipo == "gasto":
         context.user_data["pendente"] = {
-            "data_str": data_str, "tipo": tipo, "categoria": categoria,
-            "subcategoria": subcategoria, "descricao": descricao,
-            "valor": valor, "mes_ano": mes_ano, "parcelas": parcelas,
-            "parcela_info": parcela_info, "eh_reserva": eh_reserva,
-            "eh_pais": eh_pais, "eh_pai": eh_pai, "eh_mae": eh_mae,
-            "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
+            "data_str": data_str,
+            "tipo": tipo,
+            "categoria": categoria,
+            "subcategoria": subcategoria,
+            "descricao": descricao,
+            "valor": valor,
+            "mes_ano": mes_ano,
+            "parcelas": parcelas,
+            "parcela_info": parcela_info,
+            "eh_reserva": eh_reserva,
+            "eh_pais": eh_pais,
+            "eh_pai": eh_pai,
+            "eh_mae": eh_mae,
+            "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}"),
         }
+
         if parcelas > 1:
             valor_parcela = valor / parcelas
             texto_pagto = (
@@ -274,45 +370,59 @@ async def _finalizar_lancamento(update, context, dados, texto_original):
         await update.message.reply_text(
             texto_pagto,
             parse_mode="Markdown",
-            reply_markup=BOTOES_PAGTO
+            reply_markup=BOTOES_PAGTO,
         )
         return
 
     await _salvar_e_confirmar(update, context, {
-        "data_str": data_str, "tipo": tipo, "categoria": categoria,
-        "subcategoria": subcategoria, "descricao": descricao,
-        "valor": valor, "forma": forma, "mes_ano": mes_ano,
-        "parcelas": parcelas, "parcela_info": parcela_info,
-        "eh_reserva": eh_reserva, "eh_pais": eh_pais,
-        "eh_pai": eh_pai, "eh_mae": eh_mae,
-        "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}")
+        "data_str": data_str,
+        "tipo": tipo,
+        "categoria": categoria,
+        "subcategoria": subcategoria,
+        "descricao": descricao,
+        "valor": valor,
+        "forma": forma,
+        "mes_ano": mes_ano,
+        "parcelas": parcelas,
+        "parcela_info": parcela_info,
+        "eh_reserva": eh_reserva,
+        "eh_pais": eh_pais,
+        "eh_pai": eh_pai,
+        "eh_mae": eh_mae,
+        "confirmacao": dados.get("confirmacao", f"Anotado! {fmt_brl(valor)}"),
     })
 
 
-import random
-import string
-
 def _gerar_id() -> str:
     """Gera um identificador curto único para cada transação."""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
 
 
 def _calcular_saldo_mes(mes_ano: str) -> dict:
     """Calcula saldo atualizado do mês após salvar."""
     lst = sheets.buscar_lancamentos_mes(mes_ano)
-    gastos   = sum(float(r["Valor"]) for r in lst if r["Tipo"] == "gasto")
+
+    gastos = sum(float(r["Valor"]) for r in lst if r["Tipo"] == "gasto")
     entradas = sum(float(r["Valor"]) for r in lst if r["Tipo"] == "entrada")
-    saldo    = entradas - gastos
-    return {"gastos": gastos, "entradas": entradas, "saldo": saldo, "n": len(lst)}
+    saldo = entradas - gastos
+
+    return {
+        "gastos": gastos,
+        "entradas": entradas,
+        "saldo": saldo,
+        "n": len(lst),
+    }
 
 
 async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     """Salva na planilha e envia confirmação no estilo GranaZen."""
     tid = _gerar_id()
+
     parcelas = max(int(d.get("parcelas", 1) or 1), 1)
     valor_total = float(d["valor"])
     eh_parcelado = d["tipo"] == "gasto" and parcelas > 1
     valor_mes = round(valor_total / parcelas, 2) if eh_parcelado else valor_total
+
     if d.get("eh_reserva"):
         meta = "reserva"
     elif d.get("eh_mae"):
@@ -322,17 +432,41 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
     else:
         meta = ""
 
+    mes_fatura = calcular_mes_fatura(
+        d["data_str"],
+        d["forma"],
+        d["mes_ano"],
+    )
+
     if eh_parcelado:
         ok = sheets.salvar_lancamento_parcelado(
-            d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
-            d["descricao"], valor_total, d["forma"], d["mes_ano"], parcelas,
-            transacao_id=tid, meta=meta,
+            d["data_str"],
+            d["tipo"],
+            d["categoria"],
+            d["subcategoria"],
+            d["descricao"],
+            valor_total,
+            d["forma"],
+            mes_fatura,
+            parcelas,
+            transacao_id=tid,
+            meta=meta,
         )
     else:
         ok = sheets.salvar_lancamento(
-            d["data_str"], d["tipo"], d["categoria"], d["subcategoria"],
-            d["descricao"], valor_mes, d["forma"], d["mes_ano"], d["parcela_info"],
-            transacao_id=tid, valor_total=valor_total, meta=meta,
+            d["data_str"],
+            d["tipo"],
+            d["categoria"],
+            d["subcategoria"],
+            d["descricao"],
+            valor_mes,
+            d["forma"],
+            d["mes_ano"],
+            d["parcela_info"],
+            transacao_id=tid,
+            valor_total=valor_total,
+            meta=meta,
+            mes_fatura=mes_fatura,
         )
 
     if ok:
@@ -341,7 +475,9 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
             atual = sheets.buscar_meta_valor("reserva")
             sheets.atualizar_meta("Reserva de emergência", atual + valor_mes)
 
-        if d["tipo"] == "gasto" and (d.get("eh_pai") or (d.get("eh_pais") and not d.get("eh_mae"))):
+        if d["tipo"] == "gasto" and (
+            d.get("eh_pai") or (d.get("eh_pais") and not d.get("eh_mae"))
+        ):
             atual = sheets.buscar_meta_valor("dívida com o pai")
             sheets.atualizar_meta("Dívida com o pai", atual + valor_mes)
 
@@ -353,28 +489,41 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
         if eh_parcelado:
             encerra = calcular_encerramento_parcela(parcelas, d["data_str"])
             sheets.salvar_parcela(
-                d["descricao"], d["forma"], valor_mes, 1, parcelas, encerra,
-                mes_inicio=d["mes_ano"], transacao_id=tid, valor_total=valor_total,
+                d["descricao"],
+                d["forma"],
+                valor_mes,
+                1,
+                parcelas,
+                encerra,
+                mes_inicio=mes_fatura,
+                transacao_id=tid,
+                valor_total=valor_total,
             )
 
     # Busca saldo atualizado do mês corrente da transação.
     saldo_info = _calcular_saldo_mes(d["mes_ano"])
 
-    # Emoji do tipo
     tipo_emoji = "🟥 Despesa" if d["tipo"] == "gasto" else "🟩 Receita"
     pagto_label = emoji_pagto(d["forma"]) if d["forma"] != "perguntar" else "💳 Cartão"
     saldo_emoji = "✅" if saldo_info["saldo"] >= 0 else "⚠️"
 
     extras = []
+
     if eh_parcelado:
         extras.append(f"📦 *Parcelas:* {parcelas}x de {fmt_brl(valor_mes)}")
         extras.append("🗓 *Impacto mensal:* as parcelas futuras já foram distribuídas nos próximos meses")
+
     if d.get("eh_reserva"):
         extras.append("🛡 *Reserva de emergência atualizada!*")
+
     if d.get("eh_mae"):
         extras.append("👩 *Dívida com a mãe atualizada!*")
     elif d.get("eh_pai") or d.get("eh_pais"):
         extras.append("👨 *Dívida com o pai atualizada!*")
+
+    if d["tipo"] == "gasto" and _identificar_cartao_por_forma(d["forma"]):
+        extras.append(f"💳 *Fatura:* {mes_fatura}")
+
     extras_str = ("\n" + "\n".join(extras)) if extras else ""
 
     if eh_parcelado:
@@ -412,14 +561,23 @@ async def _salvar_e_confirmar(update_or_query, context, d, edit=False):
 
     reply_markup = teclado_excluir(tid) if ok else None
 
-    if edit and hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+    if edit and hasattr(update_or_query, "edit_message_text"):
+        await update_or_query.edit_message_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
     else:
-        await update_or_query.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update_or_query.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
 
 
 async def _processar_exclusao(update: Update, transacao_id: str):
     resultado = sheets.excluir_transacao(transacao_id)
+
     if not resultado.get("ok"):
         await update.message.reply_text(
             f"Não encontrei uma transação com o identificador *{transacao_id}*.",
@@ -430,15 +588,19 @@ async def _processar_exclusao(update: Update, transacao_id: str):
     detalhes = []
     lancamentos = resultado.get("lancamentos_excluidos", 0)
     parcelas = resultado.get("parcelas_excluidas", 0)
+
     if lancamentos:
         detalhes.append(f"{lancamentos} lançamento(s) removido(s)")
+
     if parcelas:
         detalhes.append("controle de parcelas removido")
+
     if resultado.get("metas_revertidas"):
         detalhes.append("meta atualizada de volta")
 
     detalhe_txt = " · ".join(detalhes)
     descricao = resultado.get("descricao") or "transação"
+
     await update.message.reply_text(
         f"✅ Excluí *{descricao}* ({transacao_id}).\n_{detalhe_txt}_",
         parse_mode="Markdown",
@@ -449,7 +611,9 @@ async def callback_atalhos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callbacks simples de navegação, como mostrar últimos lançamentos."""
     query = update.callback_query
     await query.answer()
+
     data = query.data or ""
+
     if not data.startswith("showlast:"):
         return
 
@@ -459,6 +623,7 @@ async def callback_atalhos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limite = 8
 
     ultimos = sheets.buscar_ultimos_lancamentos(limite)
+
     if not ultimos:
         await query.message.reply_text("Nenhum lançamento encontrado ainda.")
         return
@@ -475,26 +640,36 @@ async def callback_atalhos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         forma = r.get("Forma_Pagto", "")
         parcela = r.get("Parcela", "")
         parcela_txt = f" · Parcela {parcela}" if parcela else ""
+
         msg = (
             f"{emoji_tipo} *{descricao}*\n"
             f"{sinal}{fmt_brl(valor)} · {categoria}\n"
             f"{data_reg} · {forma}{parcela_txt}"
         )
+
         teclado = None
+
         if tid:
             msg += f"\nID: *{tid}*"
             teclado = teclado_excluir(tid)
-        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=teclado)
+
+        await query.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=teclado,
+        )
 
 
 async def callback_exclusao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback dos botões de exclusão com confirmação."""
     query = update.callback_query
     await query.answer()
+
     data = query.data or ""
 
     if data.startswith("delask:"):
         transacao_id = data.split(":", 1)[1].upper()
+
         await query.edit_message_text(
             f"⚠️ *Confirmar exclusão*\n\n"
             f"Deseja excluir a transação *{transacao_id}*?\n\n"
@@ -511,6 +686,7 @@ async def callback_exclusao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("delyes:"):
         transacao_id = data.split(":", 1)[1].upper()
         resultado = sheets.excluir_transacao(transacao_id)
+
         if not resultado.get("ok"):
             await query.edit_message_text(
                 f"Não encontrei uma transação com o identificador *{transacao_id}*.",
@@ -521,15 +697,19 @@ async def callback_exclusao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detalhes = []
         lancamentos = resultado.get("lancamentos_excluidos", 0)
         parcelas = resultado.get("parcelas_excluidas", 0)
+
         if lancamentos:
             detalhes.append(f"{lancamentos} lançamento(s) removido(s)")
+
         if parcelas:
             detalhes.append("controle de parcelas removido")
+
         if resultado.get("metas_revertidas"):
             detalhes.append("meta atualizada de volta")
 
         detalhe_txt = " · ".join(detalhes) or "transação removida"
         descricao = resultado.get("descricao") or "transação"
+
         await query.edit_message_text(
             f"✅ Excluí *{descricao}* ({transacao_id}).\n_{detalhe_txt}_",
             parse_mode="Markdown",
@@ -545,7 +725,7 @@ async def callback_pagto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query.data.startswith("pagto:"):
         return
 
-    forma    = query.data.split(":")[1]
+    forma = query.data.split(":")[1]
     pendente = context.user_data.get("pendente")
 
     if not pendente:
@@ -554,27 +734,40 @@ async def callback_pagto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("pendente", None)
     pendente["forma"] = forma
+
     await _salvar_e_confirmar(query, context, pendente, edit=True)
 
 
 async def _processar_wishlist(update, context, dados):
-    item       = dados.get("wishlist_item") or dados.get("descricao", "Item")
-    valor      = float(dados.get("valor", 0))
+    item = dados.get("wishlist_item") or dados.get("descricao", "Item")
+    valor = float(dados.get("valor", 0))
     prioridade = dados.get("wishlist_prioridade", "media")
+
     ok = sheets.salvar_wishlist(item, valor, prioridade)
-    emoji_pri  = {"alta": "🔴", "media": "🟡", "baixa": "🟢"}.get(prioridade, "⚪")
+
+    emoji_pri = {
+        "alta": "🔴",
+        "media": "🟡",
+        "baixa": "🟢",
+    }.get(prioridade, "⚪")
+
     if ok:
-        msg = (f"⭐ *{item}* adicionado à wishlist!\n"
-               f"{fmt_brl(valor)} · {emoji_pri} prioridade {prioridade}\n\n"
-               f"_/wishlist para ver tudo_")
+        msg = (
+            f"⭐ *{item}* adicionado à wishlist!\n"
+            f"{fmt_brl(valor)} · {emoji_pri} prioridade {prioridade}\n\n"
+            f"_/wishlist para ver tudo_"
+        )
     else:
         msg = "⚠️ Não consegui salvar na wishlist."
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def _processar_simulador(update, context, dados, texto_original):
     from handlers.comandos import _cmd_simulador_interno
+
     descricao = dados.get("simulador_descricao") or dados.get("descricao", texto_original)
-    valor     = float(dados.get("simulador_valor_total") or dados.get("valor", 0))
-    parcelas  = int(dados.get("simulador_parcelas") or dados.get("parcelas", 1))
+    valor = float(dados.get("simulador_valor_total") or dados.get("valor", 0))
+    parcelas = int(dados.get("simulador_parcelas") or dados.get("parcelas", 1))
+
     await _cmd_simulador_interno(update, context, descricao, valor, parcelas)

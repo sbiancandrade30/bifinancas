@@ -35,3 +35,12 @@ CARTOES = {
         "aliases": ["banco do brasil", "bb"]
     },
 }
+def identificar_cartao(texto: str):
+    texto = (texto or "").lower()
+
+    for chave, dados in CARTOES.items():
+        for alias in dados.get("aliases", []):
+            if alias.lower() in texto:
+                return chave, dados
+
+    return None, None

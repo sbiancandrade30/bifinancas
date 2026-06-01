@@ -194,11 +194,14 @@ def salvar_lancamento(
         _garantir_cabecalhos(ws, ABAS["Lançamentos"])
         if not mes_fatura:
             mes_fatura = mes
-        ws.append_row([
-            data, tipo, categoria, subcategoria, descricao,
-            float(valor), forma_pagto, mes, mes_fatura, parcela, transacao_id,
-            float(valor_total if valor_total is not None else valor), meta,
-        ])
+        ws.append_row(
+            [
+                data, tipo, categoria, subcategoria, descricao,
+                float(valor), forma_pagto, mes, mes_fatura, parcela, transacao_id,
+                float(valor_total if valor_total is not None else valor), meta,
+            ],
+            value_input_option="USER_ENTERED"
+        )
         return True
     except Exception as e:
         logger.error("Erro ao salvar lançamento: %s", e)

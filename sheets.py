@@ -22,6 +22,15 @@ SCOPES = [
 # Os primeiros campos de Lançamentos/Parcelas preservam o formato já usado pelo dashboard.
 # As novas colunas ficam no final para não quebrar a leitura existente.
 ABAS = {
+    "Lista_Mercado": [
+        "ID",
+        "Item",
+        "Unidades",
+        "Comprado",
+        "Data_Adição",
+        "Data_Compra",
+        "Observação",
+    ],
     "Lançamentos": [
         "Data", "Tipo", "Categoria", "Subcategoria", "Descrição",
         "Valor", "Forma_Pagto", "Mês", "Mês_Fatura", "Parcela", "ID",
@@ -529,3 +538,33 @@ def buscar_scores():
     except Exception as e:
         logger.error("Erro: %s", e)
         return []
+
+def salvar_item_lista_mercado(item, unidades="", observacao=""):
+    try:
+        ws = get_sheet().worksheet("Lista_Mercado")
+        _garantir_cabecalhos(ws, ABAS["Lista_Mercado"])
+
+        from datetime import datetime
+        import random
+        import string
+
+        item_id = "LM-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        data_adicao = datetime.now().strftime("%d/%m/%Y")
+
+        ws.append_row(
+            [
+                item_id,
+                str(item).strip().title(),
+                unidades,
+                "Não",
+                data_adicao,
+                "",
+                observacao,
+            ],
+            value_input_option="USER_ENTERED"
+        )
+
+        return True
+    except Exception as e:
+        logger.error("Erro ao salvar item na lista de mercado: %s", e)
+        return False

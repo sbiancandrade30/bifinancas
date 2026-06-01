@@ -154,6 +154,13 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         await _processar_exclusao(update, match_exclusao.group(1).upper())
         return
 
+    # Lista de mercado: trata localmente antes de chamar IA/Gemini.
+    # Isso evita erro de limite da IA em mensagens simples como:
+    # "coloca arroz e leite na lista de mercado"
+    if _eh_lista_mercado(texto):
+        await _processar_lista_mercado(update, context, texto)
+        return
+
     # 1. Classifica a intenção da mensagem
     intencao = ai.classificar_intencao(texto)
 
@@ -196,6 +203,88 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
     await _finalizar_lancamento(update, context, dados, texto)
 
+
+def _eh_lista_mercado(texto: str) -> bool:
+    t = (texto or "").lower()
+    return (
+        "lista de mercado" in t
+        or "lista de compras" in t
+        or "lista do mercado" in t
+        or ("na lista" in t and any(p in t for p in ["coloca", "adiciona", "inclui", "bota", "coloque"]))
+    )
+
+
+def _extrair_itens_lista_mercado(texto: str):
+    t = (texto or "").strip()
+
+    # remove comandos comuns
+    t = re.sub(r"(?i)\b(coloca|coloque|adiciona|adicione|inclui|inclua|bota|botar)\b", "", t)
+    t = re.sub(r"(?i)\b(na|no|para a|pra|para)\s+(minha\s+)?lista\s+(de mercado|de compras|do mercado)?\b", "", t)
+    t = re.sub(r"(?i)\b(lista de mercado|lista de compras|lista do mercado)\b", "", t)
+
+    # separa por vírgula, quebra de linha e " e "
+    partes = re.split(r",|\n|\s+e\s+", t)
+
+    itens = []
+    for parte in partes:
+        item = parte.strip(" .;:-").strip()
+        if not item:
+            continue
+
+        # tenta separar unidade: "2 leite", "3 arroz", "1 detergente"
+        m = re.match(r"^(\d+(?:[,.]\d+)?)\s+(.+)$", item)
+        if m:
+            unidades = m.group(1).replace(",", ".")
+            nome = m.group(2).strip()
+        else:
+            unidades = ""
+            nome = item
+
+        if nome:
+            itens.append({
+                "item": nome,
+                "unidades": unidades,
+                "observacao": "",
+            })
+
+    return itens
+
+
+async def _processar_lista_mercado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    itens = _extrair_itens_lista_mercado(texto)
+
+    if not itens:
+        await update.message.reply_text(
+            "🛒 Entendi que é lista de mercado, mas não consegui identificar os itens."
+        )
+        return
+
+    salvos = []
+    erros = []
+
+    for dado in itens:
+        ok = sheets.salvar_item_lista_mercado(
+            dado["item"],
+            unidades=dado["unidades"],
+            observacao=dado["observacao"],
+        )
+        if ok:
+            if dado["unidades"]:
+                salvos.append(f"• {dado['item'].title()} ({dado['unidades']})")
+            else:
+                salvos.append(f"• {dado['item'].title()}")
+        else:
+            erros.append(dado["item"])
+
+    if salvos:
+        msg = "🛒 *Adicionado à lista de mercado:*\n" + "\n".join(salvos)
+    else:
+        msg = "⚠️ Não consegui salvar os itens na lista de mercado."
+
+    if erros:
+        msg += "\n\n⚠️ Não consegui salvar:\n" + "\n".join(f"• {e}" for e in erros)
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def processar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """

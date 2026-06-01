@@ -205,24 +205,28 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 
 
 def _eh_lista_mercado(texto: str) -> bool:
-    t = (texto or "").lower()
+    t = (texto or "").lower().strip()
     return (
         "lista de mercado" in t
         or "lista de compras" in t
         or "lista do mercado" in t
-        or ("na lista" in t and any(p in t for p in ["coloca", "adiciona", "inclui", "bota", "coloque"]))
+        or "na lista" in t
+        or "pra lista" in t
+        or "para lista" in t
+        or "para a lista" in t
     )
 
 
 def _extrair_itens_lista_mercado(texto: str):
     t = (texto or "").strip()
 
-    # remove comandos comuns
+    # Remove comandos comuns
     t = re.sub(r"(?i)\b(coloca|coloque|adiciona|adicione|inclui|inclua|bota|botar)\b", "", t)
     t = re.sub(r"(?i)\b(na|no|para a|pra|para)\s+(minha\s+)?lista\s+(de mercado|de compras|do mercado)?\b", "", t)
     t = re.sub(r"(?i)\b(lista de mercado|lista de compras|lista do mercado)\b", "", t)
+    t = re.sub(r"(?i)\b(na lista|pra lista|para lista|para a lista)\b", "", t)
 
-    # separa por vírgula, quebra de linha e " e "
+    # Separa por vírgula, quebra de linha e " e "
     partes = re.split(r",|\n|\s+e\s+", t)
 
     itens = []
@@ -231,11 +235,22 @@ def _extrair_itens_lista_mercado(texto: str):
         if not item:
             continue
 
-        # tenta separar unidade: "2 leite", "3 arroz", "1 detergente"
-        m = re.match(r"^(\d+(?:[,.]\d+)?)\s+(.+)$", item)
+        # Tenta separar unidade:
+        # "2 leite", "1 detergente", "500g de músculo moído",
+        # "1kg arroz", "500 ml detergente"
+        m = re.match(
+            r"^(\d+(?:[,.]\d+)?\s*(?:g|kg|ml|l|un|unid|unidade|unidades)?)\s+(.+)$",
+            item,
+            flags=re.IGNORECASE,
+        )
+
         if m:
-            unidades = m.group(1).replace(",", ".")
+            unidades = m.group(1).replace(",", ".").strip()
             nome = m.group(2).strip()
+
+            # Remove "de/da/do" depois da unidade:
+            # "500g de músculo moído" -> "músculo moído"
+            nome = re.sub(r"(?i)^(de|da|do|dos|das)\s+", "", nome).strip()
         else:
             unidades = ""
             nome = item

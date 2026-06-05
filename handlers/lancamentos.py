@@ -153,7 +153,12 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     if match_exclusao:
         await _processar_exclusao(update, match_exclusao.group(1).upper())
         return
-
+  
+    # Baixa de item da lista de mercado: trata antes da IA/Gemini.
+    if _eh_baixa_lista_mercado(texto):
+        await _processar_baixa_lista_mercado(update, context, texto)
+        return
+   
     # Lista de mercado: trata localmente antes de chamar IA/Gemini.
     # Isso evita erro de limite da IA em mensagens simples como:
     # "coloca arroz e leite na lista de mercado"
@@ -298,6 +303,76 @@ async def _processar_lista_mercado(update: Update, context: ContextTypes.DEFAULT
 
     if erros:
         msg += "\n\n⚠️ Não consegui salvar:\n" + "\n".join(f"• {e}" for e in erros)
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+def _eh_baixa_lista_mercado(texto: str) -> bool:
+    t = (texto or "").lower().strip()
+
+    # Evita confundir compra financeira com baixa da lista
+    tem_valor = bool(re.search(r"\b\d+[,.]?\d*\s*(reais|real|r\$)\b|r\$", t))
+
+    return (
+        not tem_valor
+        and (
+            "marcar" in t and "comprado" in t
+            or "comprei " in t
+            or "já comprei" in t
+            or "ja comprei" in t
+        )
+    )
+
+
+def _extrair_itens_comprados_lista(texto: str):
+    linhas = [l.strip() for l in (texto or "").splitlines() if l.strip()]
+    itens = []
+
+    for linha in linhas:
+        t = linha.strip()
+
+        t = re.sub(r"(?i)\b(já|ja)?\s*comprei\b", "", t).strip()
+        t = re.sub(r"(?i)\bmarcar\b", "", t).strip()
+        t = re.sub(r"(?i)\bcomo comprado\b", "", t).strip()
+        t = re.sub(r"(?i)\bna lista\b", "", t).strip()
+        t = t.strip(" .;:-")
+
+        if t:
+            itens.append(t)
+
+    return itens
+
+
+async def _processar_baixa_lista_mercado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    itens = _extrair_itens_comprados_lista(texto)
+
+    if not itens:
+        await update.message.reply_text(
+            "🛒 Entendi que você comprou algo da lista, mas não consegui identificar o item."
+        )
+        return
+
+    comprados = []
+    nao_encontrados = []
+
+    for item in itens:
+        resultado = sheets.marcar_item_lista_mercado_comprado(item)
+
+        if resultado.get("ok"):
+            comprados.append(resultado.get("item", item))
+        else:
+            nao_encontrados.append(item)
+
+    msg = ""
+
+    if comprados:
+        msg += "✅ *Marcado como comprado:*\n"
+        msg += "\n".join(f"• {i.title()}" for i in comprados)
+
+    if nao_encontrados:
+        if msg:
+            msg += "\n\n"
+        msg += "⚠️ *Não encontrei na lista:*\n"
+        msg += "\n".join(f"• {i.title()}" for i in nao_encontrados)
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 

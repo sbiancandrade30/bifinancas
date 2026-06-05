@@ -568,3 +568,37 @@ def salvar_item_lista_mercado(item, unidades="", observacao=""):
     except Exception as e:
         logger.error("Erro ao salvar item na lista de mercado: %s", e)
         return False
+
+def marcar_item_lista_mercado_comprado(item):
+    try:
+        ws = get_sheet().worksheet("Lista_Mercado")
+        _garantir_cabecalhos(ws, ABAS["Lista_Mercado"])
+
+        registros = ws.get_all_records()
+        item_busca = str(item or "").strip().lower()
+
+        if not item_busca:
+            return {"ok": False, "motivo": "item_vazio"}
+
+        from datetime import datetime
+        data_compra = datetime.now().strftime("%d/%m/%Y")
+
+        for idx, r in enumerate(registros, start=2):
+            nome_item = str(r.get("Item", "")).strip().lower()
+            comprado = str(r.get("Comprado", "")).strip().lower()
+
+            if nome_item == item_busca and comprado not in ["sim", "s", "yes", "true"]:
+                ws.update_cell(idx, 4, "Sim")          # Coluna D: Comprado
+                ws.update_cell(idx, 6, data_compra)    # Coluna F: Data_Compra
+
+                return {
+                    "ok": True,
+                    "item": r.get("Item", item),
+                    "data_compra": data_compra,
+                }
+
+        return {"ok": False, "motivo": "nao_encontrado", "item": item}
+
+    except Exception as e:
+        logger.error("Erro ao marcar item da lista como comprado: %s", e)
+        return {"ok": False, "motivo": "erro"}

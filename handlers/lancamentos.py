@@ -166,6 +166,19 @@ async def processar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         await _processar_lista_mercado(update, context, texto)
         return
 
+    # Contas a pagar: trata localmente antes de chamar IA/Gemini.
+    if _eh_cadastro_conta_pagar(texto):
+        await _processar_cadastro_conta_pagar(update, context, texto)
+        return
+
+    if _eh_pagamento_conta_pagar(texto):
+        await _processar_pagamento_conta_pagar(update, context, texto)
+        return
+
+    if _eh_consulta_contas_pagar(texto):
+        await _processar_consulta_contas_pagar(update, context, texto)
+        return
+
     # 1. Classifica a intenção da mensagem
     intencao = ai.classificar_intencao(texto)
 
@@ -373,6 +386,325 @@ async def _processar_baixa_lista_mercado(update: Update, context: ContextTypes.D
             msg += "\n\n"
         msg += "⚠️ *Não encontrei na lista:*\n"
         msg += "\n".join(f"• {i.title()}" for i in nao_encontrados)
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+
+# ─── CONTAS A PAGAR ───────────────────────────────────────────────────────────
+
+def _eh_cadastro_conta_pagar(texto: str) -> bool:
+    t = (texto or "").lower().strip()
+
+    if _eh_pagamento_conta_pagar(t) or _eh_consulta_contas_pagar(t):
+        return False
+
+    tem_indicador_conta = (
+        "conta de" in t
+        or "adicionar conta" in t
+        or "cadastrar conta" in t
+        or "lançar conta" in t
+        or "lancar conta" in t
+        or "vencimento" in t
+        or "vence dia" in t
+        or "vence em" in t
+    )
+
+    tem_valor = bool(re.search(r"(?:r\$\s*)?\d+(?:[,.]\d{1,2})?", t))
+    tem_vencimento = bool(re.search(r"\b(vencimento|vence|dia)\b", t))
+
+    return tem_indicador_conta and tem_valor and tem_vencimento
+
+
+def _eh_pagamento_conta_pagar(texto: str) -> bool:
+    t = (texto or "").lower().strip()
+
+    if "paguei" not in t and "marcar" not in t:
+        return False
+
+    return (
+        "conta" in t
+        or "internet" in t
+        or "energia" in t
+        or "aluguel" in t
+        or "água" in t
+        or "agua" in t
+        or "faculdade" in t
+        or "pós" in t
+        or "pos" in t
+        or "curso" in t
+    )
+
+
+def _eh_consulta_contas_pagar(texto: str) -> bool:
+    t = (texto or "").lower().strip()
+    return (
+        "contas pendentes" in t
+        or "contas a pagar" in t
+        or "contas vencendo" in t
+        or "contas vencem" in t
+        or "contas dessa semana" in t
+        or "o que tenho que pagar" in t
+        or "o que preciso pagar" in t
+        or "vencem essa semana" in t
+    )
+
+
+def _parse_valor_conta(texto: str) -> float | None:
+    t = (texto or "").lower()
+    padroes = [
+        r"r\$\s*(\d+(?:[.,]\d{1,2})?)",
+        r"\b(\d+(?:[.,]\d{1,2})?)\s*(?:reais|real)\b",
+        r"\b(?:de|valor|custa|custou)\s+(\d+(?:[.,]\d{1,2})?)\b",
+        r"\b(\d+(?:[.,]\d{1,2})?)\b",
+    ]
+
+    for padrao in padroes:
+        m = re.search(padrao, t)
+        if m:
+            try:
+                return float(m.group(1).replace(".", "").replace(",", "."))
+            except Exception:
+                pass
+
+    return None
+
+
+def _parse_vencimento_conta(texto: str) -> str | None:
+    t = (texto or "").lower().strip()
+    hoje = datetime.now()
+
+    # Data completa: 10/06/2026 ou 10/06
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", t)
+    if m:
+        dia = int(m.group(1))
+        mes = int(m.group(2))
+        ano_raw = m.group(3)
+        ano = hoje.year if not ano_raw else int(ano_raw)
+        if ano < 100:
+            ano += 2000
+        try:
+            return datetime(ano, mes, dia).strftime("%d/%m/%Y")
+        except Exception:
+            return None
+
+    # Dia do mês: vencimento dia 10 / vence dia 15 / dia 5
+    m = re.search(r"\b(?:vencimento|vence|dia)\s*(?:dia)?\s*(\d{1,2})\b", t)
+    if not m:
+        m = re.search(r"\bdia\s+(\d{1,2})\b", t)
+
+    if m:
+        dia = int(m.group(1))
+        mes = hoje.month
+        ano = hoje.year
+
+        # Se o dia informado já passou, joga para o próximo mês.
+        # Ex.: hoje 20/06, "vence dia 10" -> 10/07.
+        if dia < hoje.day:
+            mes += 1
+            if mes > 12:
+                mes = 1
+                ano += 1
+
+        try:
+            return datetime(ano, mes, dia).strftime("%d/%m/%Y")
+        except Exception:
+            return None
+
+    return None
+
+
+def _inferir_categoria_conta(nome: str) -> str:
+    t = (nome or "").lower()
+
+    if any(p in t for p in ["internet", "energia", "luz", "água", "agua", "gás", "gas", "aluguel", "condomínio", "condominio"]):
+        return "Casa"
+
+    if any(p in t for p in ["faculdade", "pós", "pos", "curso", "escola", "livro"]):
+        return "Educação"
+
+    if any(p in t for p in ["plano", "farmácia", "farmacia", "consulta", "terapia", "médico", "medico"]):
+        return "Saúde/Farmácia"
+
+    if any(p in t for p in ["netflix", "spotify", "amazon", "prime", "assinatura", "streaming"]):
+        return "Assinaturas"
+
+    return "Outros"
+
+
+def _extrair_nome_conta(texto: str) -> str:
+    t = (texto or "").strip()
+
+    # Remove comandos principais
+    t = re.sub(r"(?i)\b(adicionar|adicione|cadastrar|cadastre|lançar|lancar|lança|lanca)\b", "", t)
+    t = re.sub(r"(?i)\b(conta|boleto)\s+(de|da|do)?\b", "", t)
+
+    # Remove valor
+    t = re.sub(r"(?i)r\$\s*\d+(?:[,.]\d{1,2})?", "", t)
+    t = re.sub(r"(?i)\b\d+(?:[,.]\d{1,2})?\s*(reais|real)\b", "", t)
+    t = re.sub(r"(?i)\b(de|valor|custa|custou)\s+\d+(?:[,.]\d{1,2})?\b", "", t)
+
+    # Remove vencimento
+    t = re.sub(r"(?i)\b(vencimento|vence)\s*(dia)?\s*\d{1,2}\b", "", t)
+    t = re.sub(r"(?i)\bdia\s+\d{1,2}\b", "", t)
+    t = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", "", t)
+
+    # Remove recorrência/lembrete
+    t = re.sub(r"(?i)\b(recorrente|todo mês|todo mes|mensal)\b", "", t)
+    t = re.sub(r"(?i)\blembrar\s+\d+\s+dias?\s+antes\b", "", t)
+
+    nome = t.strip(" .;:-").strip()
+    return nome or "Conta"
+
+
+def _extrair_lembrete_conta(texto: str) -> int:
+    m = re.search(r"(?i)\blembrar\s+(\d+)\s+dias?\s+antes\b", texto or "")
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
+    return 3
+
+
+def _eh_recorrente_conta(texto: str) -> str:
+    t = (texto or "").lower()
+    if any(p in t for p in ["não recorrente", "nao recorrente", "única", "unica", "uma vez"]):
+        return "Não"
+    if any(p in t for p in ["recorrente", "todo mês", "todo mes", "mensal"]):
+        return "Sim"
+    return "Sim"
+
+
+async def _processar_cadastro_conta_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    nome = _extrair_nome_conta(texto)
+    valor = _parse_valor_conta(texto)
+    vencimento = _parse_vencimento_conta(texto)
+
+    if valor is None or not vencimento:
+        await update.message.reply_text(
+            "⚠️ Entendi que é uma conta a pagar, mas faltou valor ou vencimento.\n\n"
+            "Exemplo: `adicionar conta de internet 99,90 vencimento dia 10`",
+            parse_mode="Markdown",
+        )
+        return
+
+    categoria = _inferir_categoria_conta(nome)
+    recorrente = _eh_recorrente_conta(texto)
+    lembrete = _extrair_lembrete_conta(texto)
+
+    resultado = sheets.salvar_conta_pagar(
+        nome=nome,
+        valor=valor,
+        vencimento=vencimento,
+        categoria=categoria,
+        recorrente=recorrente,
+        lembrete_dias_antes=lembrete,
+    )
+
+    if not resultado.get("ok"):
+        await update.message.reply_text("⚠️ Não consegui salvar essa conta a pagar na planilha.")
+        return
+
+    msg = (
+        "✅ *Conta a pagar cadastrada!*\n\n"
+        f"ID: *{resultado.get('id')}*\n"
+        f"📌 *Nome:* {resultado.get('nome')}\n"
+        f"🏷 *Categoria:* {categoria}\n"
+        f"💸 *Valor:* {fmt_brl(resultado.get('valor', 0))}\n"
+        f"📅 *Vencimento:* {resultado.get('vencimento')}\n"
+        f"🔁 *Recorrente:* {recorrente}\n"
+        f"🔔 *Lembrete:* {lembrete} dia(s) antes"
+    )
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+def _extrair_nome_pagamento_conta(texto: str) -> str:
+    t = (texto or "").strip()
+
+    t = re.sub(r"(?i)\b(já|ja)?\s*paguei\b", "", t).strip()
+    t = re.sub(r"(?i)\b(marcar|marque)\b", "", t).strip()
+    t = re.sub(r"(?i)\b(conta|boleto)\s+(de|da|do)?\b", "", t).strip()
+    t = re.sub(r"(?i)\bcomo\s+paga\b", "", t).strip()
+    t = re.sub(r"(?i)\bcomo\s+pago\b", "", t).strip()
+    t = re.sub(r"(?i)\bpaga\b", "", t).strip()
+    t = re.sub(r"(?i)\bpago\b", "", t).strip()
+
+    return t.strip(" .;:-").strip()
+
+
+async def _processar_pagamento_conta_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    nome = _extrair_nome_pagamento_conta(texto)
+
+    if not nome:
+        await update.message.reply_text(
+            "⚠️ Entendi que você pagou uma conta, mas não consegui identificar qual."
+        )
+        return
+
+    resultado = sheets.marcar_conta_paga(nome)
+
+    if resultado.get("ok"):
+        msg = (
+            "✅ *Conta marcada como paga!*\n\n"
+            f"ID: *{resultado.get('id')}*\n"
+            f"📌 *Nome:* {resultado.get('nome')}\n"
+            f"📅 *Data do pagamento:* {resultado.get('data_pagamento')}"
+        )
+    else:
+        msg = (
+            "⚠️ Não encontrei essa conta pendente.\n\n"
+            f"Procurei por: *{nome.title()}*"
+        )
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def _processar_consulta_contas_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    t = (texto or "").lower()
+
+    if "semana" in t or "vencendo" in t or "vencem" in t:
+        contas = sheets.buscar_contas_vencendo(7)
+        titulo = "📅 *Contas vencendo nos próximos 7 dias:*"
+    else:
+        contas = sheets.buscar_contas_pendentes(mes_atual())
+        titulo = f"📋 *Contas pendentes de {mes_atual()}:*"
+
+    if not contas:
+        await update.message.reply_text("✅ Nenhuma conta pendente encontrada.")
+        return
+
+    linhas = []
+    total = 0.0
+
+    for c in contas:
+        nome = c.get("Nome", "Conta")
+        valor = float(c.get("Valor", 0) or 0)
+        venc = c.get("Vencimento", "")
+        status = c.get("Status", "Pendente")
+        cid = c.get("ID", "")
+
+        total += valor
+
+        extra = ""
+        dias = c.get("_dias_para_vencer")
+        if dias is not None:
+            try:
+                dias_i = int(dias)
+                if dias_i < 0:
+                    extra = f" · vencida há {abs(dias_i)} dia(s)"
+                elif dias_i == 0:
+                    extra = " · vence hoje"
+                else:
+                    extra = f" · vence em {dias_i} dia(s)"
+            except Exception:
+                pass
+
+        linhas.append(f"• *{nome}* — {fmt_brl(valor)} — {venc} — {status}{extra} `({cid})`")
+
+    msg = titulo + "\n\n" + "\n".join(linhas)
+    msg += f"\n\n💰 *Total:* {fmt_brl(total)}"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 

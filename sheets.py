@@ -625,7 +625,7 @@ def _gerar_id_conta_pagar() -> str:
     try:
         ws = get_sheet().worksheet("Contas_Pagar")
         _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
-        registros = ws.get_all_records()
+        registros = ws.get_all_records(numericise_ignore=["all"])
 
         maior = 0
         for r in registros:
@@ -706,7 +706,7 @@ def marcar_conta_paga(nome_ou_id):
         ws = get_sheet().worksheet("Contas_Pagar")
         _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
 
-        registros = ws.get_all_records()
+        registros = ws.get_all_records(numericise_ignore=["all"])
         busca = _normalizar_nome_conta(nome_ou_id)
         hoje = datetime.now().strftime("%d/%m/%Y")
 
@@ -747,7 +747,7 @@ def buscar_contas_pendentes(mes_ano=None):
         ws = get_sheet().worksheet("Contas_Pagar")
         _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
 
-        registros = ws.get_all_records()
+        registros = ws.get_all_records(numericise_ignore=["all"])
         resultado = []
 
         for r in registros:
@@ -799,4 +799,3 @@ def buscar_contas_vencendo(dias=7):
     except Exception as e:
         logger.error("Erro ao buscar contas vencendo: %s", e)
         return []
-

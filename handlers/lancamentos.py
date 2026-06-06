@@ -426,21 +426,28 @@ def _eh_cadastro_conta_pagar(texto: str) -> bool:
 def _eh_pagamento_conta_pagar(texto: str) -> bool:
     t = (texto or "").lower().strip()
 
-    if "paguei" not in t and "marcar" not in t:
+    if not t:
         return False
 
-    return (
-        "conta" in t
-        or "internet" in t
-        or "energia" in t
-        or "aluguel" in t
-        or "água" in t
-        or "agua" in t
-        or "faculdade" in t
-        or "pós" in t
-        or "pos" in t
-        or "curso" in t
+    # Evita confundir com lançamento financeiro.
+    # Ex.: "paguei 20 mercado" continua indo para gasto.
+    tem_valor = bool(
+        re.search(r"r\$\s*\d+(?:[.,]\d{1,2})?", t)
+        or re.search(r"\b\d+(?:[.,]\d{1,2})?\s*(reais|real)\b", t)
     )
+
+    if tem_valor:
+        return False
+
+    # Aceita frases naturais para baixa de conta:
+    # "paguei netflix", "paguei internet", "marcar energia como paga"
+    return (
+        t.startswith("paguei ")
+        or t.startswith("já paguei ")
+        or t.startswith("ja paguei ")
+        or ("marcar" in t and ("paga" in t or "pago" in t))
+    )
+
 
 
 def _eh_consulta_contas_pagar(texto: str) -> bool:

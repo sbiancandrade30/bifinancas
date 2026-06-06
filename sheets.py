@@ -31,6 +31,20 @@ ABAS = {
         "Data_Compra",
         "Observação",
     ],
+    "Contas_Pagar": [
+        "ID",
+        "Nome",
+        "Categoria",
+        "Valor",
+        "Vencimento",
+        "Mês",
+        "Status",
+        "Pago",
+        "Data_Pagamento",
+        "Recorrente",
+        "Lembrete_Dias_Antes",
+        "Observação",
+    ],
     "Lançamentos": [
         "Data", "Tipo", "Categoria", "Subcategoria", "Descrição",
         "Valor", "Forma_Pagto", "Mês", "Mês_Fatura", "Parcela", "ID",
@@ -602,3 +616,187 @@ def marcar_item_lista_mercado_comprado(item):
     except Exception as e:
         logger.error("Erro ao marcar item da lista como comprado: %s", e)
         return {"ok": False, "motivo": "erro"}
+
+
+# ─── CONTAS A PAGAR ───────────────────────────────────────────────────────────
+
+def _gerar_id_conta_pagar() -> str:
+    """Gera ID sequencial CP001, CP002... com base na aba Contas_Pagar."""
+    try:
+        ws = get_sheet().worksheet("Contas_Pagar")
+        _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
+        registros = ws.get_all_records()
+
+        maior = 0
+        for r in registros:
+            raw_id = str(r.get("ID", "")).strip().upper()
+            if raw_id.startswith("CP"):
+                try:
+                    maior = max(maior, int(raw_id.replace("CP", "")))
+                except Exception:
+                    pass
+
+        return f"CP{maior + 1:03d}"
+    except Exception:
+        return "CP001"
+
+
+def _mes_da_data(data_str: str) -> str:
+    try:
+        return datetime.strptime(data_str, "%d/%m/%Y").strftime("%Y-%m")
+    except Exception:
+        return datetime.now().strftime("%Y-%m")
+
+
+def _normalizar_nome_conta(valor: str) -> str:
+    return str(valor or "").strip().lower()
+
+
+def salvar_conta_pagar(
+    nome,
+    valor,
+    vencimento,
+    categoria="Outros",
+    recorrente="Sim",
+    lembrete_dias_antes=3,
+    observacao="",
+):
+    """Salva uma conta a pagar na aba Contas_Pagar."""
+    try:
+        ws = get_sheet().worksheet("Contas_Pagar")
+        _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
+
+        conta_id = _gerar_id_conta_pagar()
+        mes = _mes_da_data(vencimento)
+
+        ws.append_row(
+            [
+                conta_id,
+                str(nome).strip().title(),
+                str(categoria or "Outros").strip(),
+                float(valor),
+                vencimento,
+                mes,
+                "Pendente",
+                "Não",
+                "",
+                str(recorrente or "Sim").strip().title(),
+                int(lembrete_dias_antes or 3),
+                observacao,
+            ],
+            value_input_option="USER_ENTERED",
+        )
+
+        return {
+            "ok": True,
+            "id": conta_id,
+            "nome": str(nome).strip().title(),
+            "valor": float(valor),
+            "vencimento": vencimento,
+            "mes": mes,
+        }
+    except Exception as e:
+        logger.error("Erro ao salvar conta a pagar: %s", e)
+        return {"ok": False, "motivo": "erro"}
+
+
+def marcar_conta_paga(nome_ou_id):
+    """Marca uma conta como paga na aba Contas_Pagar."""
+    try:
+        ws = get_sheet().worksheet("Contas_Pagar")
+        _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
+
+        registros = ws.get_all_records()
+        busca = _normalizar_nome_conta(nome_ou_id)
+        hoje = datetime.now().strftime("%d/%m/%Y")
+
+        if not busca:
+            return {"ok": False, "motivo": "vazio"}
+
+        for idx, r in enumerate(registros, start=2):
+            conta_id = str(r.get("ID", "")).strip().lower()
+            nome = str(r.get("Nome", "")).strip().lower()
+            pago = str(r.get("Pago", "")).strip().lower()
+            status = str(r.get("Status", "")).strip().lower()
+
+            if pago in ["sim", "s", "yes", "true"] or status == "pago":
+                continue
+
+            if busca == conta_id or busca in nome or nome in busca:
+                ws.update_cell(idx, 7, "Pago")      # Status
+                ws.update_cell(idx, 8, "Sim")       # Pago
+                ws.update_cell(idx, 9, hoje)        # Data_Pagamento
+
+                return {
+                    "ok": True,
+                    "id": r.get("ID", ""),
+                    "nome": r.get("Nome", nome_ou_id),
+                    "valor": r.get("Valor", 0),
+                    "data_pagamento": hoje,
+                }
+
+        return {"ok": False, "motivo": "nao_encontrada", "nome": nome_ou_id}
+    except Exception as e:
+        logger.error("Erro ao marcar conta como paga: %s", e)
+        return {"ok": False, "motivo": "erro"}
+
+
+def buscar_contas_pendentes(mes_ano=None):
+    """Busca contas pendentes. Se mes_ano for informado, filtra pelo mês."""
+    try:
+        ws = get_sheet().worksheet("Contas_Pagar")
+        _garantir_cabecalhos(ws, ABAS["Contas_Pagar"])
+
+        registros = ws.get_all_records()
+        resultado = []
+
+        for r in registros:
+            status = str(r.get("Status", "")).strip().lower()
+            pago = str(r.get("Pago", "")).strip().lower()
+            mes = str(r.get("Mês", "")).strip()
+
+            if mes_ano and mes != mes_ano:
+                continue
+
+            if status != "pago" and pago not in ["sim", "s", "yes", "true"]:
+                resultado.append(r)
+
+        return resultado
+    except Exception as e:
+        logger.error("Erro ao buscar contas pendentes: %s", e)
+        return []
+
+
+def buscar_contas_vencendo(dias=7):
+    """Busca contas pendentes que vencem nos próximos X dias, incluindo vencidas."""
+    try:
+        from datetime import timedelta
+
+        hoje = datetime.now().date()
+        limite = hoje + timedelta(days=int(dias or 7))
+
+        contas = buscar_contas_pendentes()
+        resultado = []
+
+        for r in contas:
+            vencimento_raw = str(r.get("Vencimento", "")).strip()
+            try:
+                vencimento = datetime.strptime(vencimento_raw, "%d/%m/%Y").date()
+            except Exception:
+                continue
+
+            if vencimento <= limite:
+                item = dict(r)
+                item["_dias_para_vencer"] = (vencimento - hoje).days
+
+                if vencimento < hoje:
+                    item["Status"] = "Vencida"
+
+                resultado.append(item)
+
+        resultado.sort(key=lambda x: x.get("_dias_para_vencer", 9999))
+        return resultado
+    except Exception as e:
+        logger.error("Erro ao buscar contas vencendo: %s", e)
+        return []
+

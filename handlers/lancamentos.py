@@ -399,6 +399,10 @@ def _eh_cadastro_conta_pagar(texto: str) -> bool:
     if _eh_pagamento_conta_pagar(t) or _eh_consulta_contas_pagar(t):
         return False
 
+    # Aceita frases formais:
+    # "adicionar conta de internet 99,90 vencimento dia 10"
+    # e frases naturais:
+    # "internet vence todo mês dia 15, 79,99"
     tem_indicador_conta = (
         "conta de" in t
         or "adicionar conta" in t
@@ -406,14 +410,17 @@ def _eh_cadastro_conta_pagar(texto: str) -> bool:
         or "lançar conta" in t
         or "lancar conta" in t
         or "vencimento" in t
-        or "vence dia" in t
-        or "vence em" in t
+        or "vence" in t
+        or "todo mês" in t
+        or "todo mes" in t
+        or "mensal" in t
     )
 
-    tem_valor = bool(re.search(r"(?:r\$\s*)?\d+(?:[,.]\d{1,2})?", t))
-    tem_vencimento = bool(re.search(r"\b(vencimento|vence|dia)\b", t))
+    valor = _parse_valor_conta(t)
+    vencimento = _parse_vencimento_conta(t)
 
-    return tem_indicador_conta and tem_valor and tem_vencimento
+    return bool(tem_indicador_conta and valor is not None and vencimento)
+
 
 
 def _eh_pagamento_conta_pagar(texto: str) -> bool:

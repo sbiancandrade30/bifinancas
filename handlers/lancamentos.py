@@ -440,9 +440,11 @@ def _eh_consulta_contas_pagar(texto: str) -> bool:
     t = (texto or "").lower().strip()
     return (
         "contas pendentes" in t
+        or ("contas" in t and "pendentes" in t)
         or "contas a pagar" in t
         or "contas vencendo" in t
         or "contas vencem" in t
+        or ("contas" in t and "vencem" in t)
         or "contas dessa semana" in t
         or "o que tenho que pagar" in t
         or "o que preciso pagar" in t
@@ -450,16 +452,18 @@ def _eh_consulta_contas_pagar(texto: str) -> bool:
     )
 
 
+
 def _parse_valor_conta(texto: str) -> float | None:
-    t = (texto or "").lower()
-    padroes = [
+    t = (texto or "").lower().strip()
+
+    # Prioridade 1: valores explícitos
+    padroes_explicitos = [
         r"r\$\s*(\d+(?:[.,]\d{1,2})?)",
         r"\b(\d+(?:[.,]\d{1,2})?)\s*(?:reais|real)\b",
-        r"\b(?:de|valor|custa|custou)\s+(\d+(?:[.,]\d{1,2})?)\b",
-        r"\b(\d+(?:[.,]\d{1,2})?)\b",
+        r"\b(?:valor|custa|custou)\s+(\d+(?:[.,]\d{1,2})?)\b",
     ]
 
-    for padrao in padroes:
+    for padrao in padroes_explicitos:
         m = re.search(padrao, t)
         if m:
             try:
@@ -467,7 +471,29 @@ def _parse_valor_conta(texto: str) -> float | None:
             except Exception:
                 pass
 
+    # Prioridade 2: valor no final depois de vírgula
+    # Ex.: "internet vence todo mês dia 15, 79,99"
+    m = re.search(r",\s*(\d+(?:[.,]\d{1,2})?)\s*$", t)
+    if m:
+        try:
+            return float(m.group(1).replace(".", "").replace(",", "."))
+        except Exception:
+            pass
+
+    # Prioridade 3: último número que não seja o dia de vencimento
+    tmp = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", " ", t)
+    tmp = re.sub(r"\b(?:vencimento|vence|dia)\s*(?:todo\s+m[eê]s\s*)?(?:dia)?\s*\d{1,2}\b", " ", tmp)
+    tmp = re.sub(r"\bdia\s+\d{1,2}\b", " ", tmp)
+
+    numeros = re.findall(r"\b\d+(?:[.,]\d{1,2})?\b", tmp)
+    if numeros:
+        try:
+            return float(numeros[-1].replace(".", "").replace(",", "."))
+        except Exception:
+            pass
+
     return None
+
 
 
 def _parse_vencimento_conta(texto: str) -> str | None:
@@ -488,8 +514,11 @@ def _parse_vencimento_conta(texto: str) -> str | None:
         except Exception:
             return None
 
-    # Dia do mês: vencimento dia 10 / vence dia 15 / dia 5
-    m = re.search(r"\b(?:vencimento|vence|dia)\s*(?:dia)?\s*(\d{1,2})\b", t)
+    # Dia do mês:
+    # "vencimento dia 10", "vence dia 15", "vence todo mês dia 15", "todo mês dia 15"
+    m = re.search(r"\b(?:vencimento|vence)\s*(?:todo\s+m[eê]s\s*)?(?:dia)?\s*(\d{1,2})\b", t)
+    if not m:
+        m = re.search(r"\btodo\s+m[eê]s\s+dia\s+(\d{1,2})\b", t)
     if not m:
         m = re.search(r"\bdia\s+(\d{1,2})\b", t)
 
@@ -499,7 +528,6 @@ def _parse_vencimento_conta(texto: str) -> str | None:
         ano = hoje.year
 
         # Se o dia informado já passou, joga para o próximo mês.
-        # Ex.: hoje 20/06, "vence dia 10" -> 10/07.
         if dia < hoje.day:
             mes += 1
             if mes > 12:
@@ -512,6 +540,7 @@ def _parse_vencimento_conta(texto: str) -> str | None:
             return None
 
     return None
+
 
 
 def _inferir_categoria_conta(nome: str) -> str:
@@ -542,10 +571,15 @@ def _extrair_nome_conta(texto: str) -> str:
     # Remove valor
     t = re.sub(r"(?i)r\$\s*\d+(?:[,.]\d{1,2})?", "", t)
     t = re.sub(r"(?i)\b\d+(?:[,.]\d{1,2})?\s*(reais|real)\b", "", t)
-    t = re.sub(r"(?i)\b(de|valor|custa|custou)\s+\d+(?:[,.]\d{1,2})?\b", "", t)
+    t = re.sub(r"(?i)\b(valor|custa|custou)\s+\d+(?:[,.]\d{1,2})?\b", "", t)
+
+    # Remove valor no final depois de vírgula.
+    # Ex.: "internet vence todo mês dia 15, 79,99"
+    t = re.sub(r",\s*\d+(?:[,.]\d{1,2})?\s*$", "", t)
 
     # Remove vencimento
-    t = re.sub(r"(?i)\b(vencimento|vence)\s*(dia)?\s*\d{1,2}\b", "", t)
+    t = re.sub(r"(?i)\b(vencimento|vence)\s*(todo\s+m[eê]s\s*)?(dia)?\s*\d{1,2}\b", "", t)
+    t = re.sub(r"(?i)\btodo\s+m[eê]s\s+dia\s+\d{1,2}\b", "", t)
     t = re.sub(r"(?i)\bdia\s+\d{1,2}\b", "", t)
     t = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", "", t)
 
@@ -555,6 +589,7 @@ def _extrair_nome_conta(texto: str) -> str:
 
     nome = t.strip(" .;:-").strip()
     return nome or "Conta"
+
 
 
 def _extrair_lembrete_conta(texto: str) -> int:

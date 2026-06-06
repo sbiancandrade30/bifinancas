@@ -710,6 +710,37 @@ async def _processar_pagamento_conta_pagar(update: Update, context: ContextTypes
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+
+def _valor_planilha_para_float(valor) -> float:
+    """Converte valores vindos da planilha para float sem quebrar vírgula brasileira.
+
+    Exemplos:
+    - 79,99 -> 79.99
+    - 1.209,99 -> 1209.99
+    - 180 -> 180.0
+    """
+    if isinstance(valor, (int, float)):
+        return float(valor)
+
+    texto = str(valor or "").strip()
+
+    if not texto:
+        return 0.0
+
+    texto = texto.replace("R$", "").replace(" ", "")
+
+    # Formato brasileiro: 79,99 ou 1.234,56
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    else:
+        texto = texto.replace(",", "")
+
+    try:
+        return float(texto)
+    except Exception:
+        return 0.0
+
+
 async def _processar_consulta_contas_pagar(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     t = (texto or "").lower()
 
@@ -729,7 +760,7 @@ async def _processar_consulta_contas_pagar(update: Update, context: ContextTypes
 
     for c in contas:
         nome = c.get("Nome", "Conta")
-        valor = float(c.get("Valor", 0) or 0)
+        valor = _valor_planilha_para_float(c.get("Valor", 0))
         venc = c.get("Vencimento", "")
         status = c.get("Status", "Pendente")
         cid = c.get("ID", "")

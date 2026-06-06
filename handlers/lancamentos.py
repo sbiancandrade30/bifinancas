@@ -710,17 +710,21 @@ async def _processar_pagamento_conta_pagar(update: Update, context: ContextTypes
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
-
 def _valor_planilha_para_float(valor) -> float:
     """Converte valores vindos da planilha para float sem quebrar vírgula brasileira.
 
-    Exemplos:
-    - 79,99 -> 79.99
-    - 1.209,99 -> 1209.99
-    - 180 -> 180.0
+    Corrige também o caso em que o Google Sheets devolve 79,99 como 7999.
     """
     if isinstance(valor, (int, float)):
-        return float(valor)
+        numero = float(valor)
+
+        # Heurística para a aba Contas_Pagar:
+        # quando a planilha devolve 79,99 como 7999, corrigimos para 79.99.
+        # Mantém valores normais como 180 e 950 sem alteração.
+        if numero >= 3000 and float(numero).is_integer():
+            return numero / 100
+
+        return numero
 
     texto = str(valor or "").strip()
 
@@ -736,7 +740,13 @@ def _valor_planilha_para_float(valor) -> float:
         texto = texto.replace(",", "")
 
     try:
-        return float(texto)
+        numero = float(texto)
+
+        # Mesmo ajuste para texto numérico já vindo como "7999"
+        if numero >= 3000 and numero.is_integer():
+            return numero / 100
+
+        return numero
     except Exception:
         return 0.0
 
